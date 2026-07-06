@@ -26,7 +26,7 @@ def _out(argv):
 
 
 def _run(argv):
-    return run(argv)
+    return run(argv, text=True, stdout=PIPE, stderr=PIPE)
 
 
 def _ask(prompt, default=''):
@@ -45,6 +45,55 @@ def _normalize_source(src):
     if src.startswith('rk apply/'):
         src = src[8:]
     return src
+
+
+def _dev_exists(dev):
+    if not dev:
+        return False
+    return run(['ip', 'link', 'show', 'dev', dev], text=True, stdout=PIPE, stderr=PIPE).returncode == 0
+
+
+def _first_tunnel_dev():
+    links = _out(['ip', '-o', 'link', 'show']).splitlines()
+    for line in links:
+        name = line.split(':', 2)[1].strip().split('@', 1)[0]
+        if name.startswith('tun') or name.startswith('tap') or name.startswith('ovpn') or name.startswith('wg'):
+            return name
+    return ''
+
+
+def _config_dev(path):
+    p = Path(path or '')
+    if not p.exists():
+        return ''
+    for raw in p.read_text(encoding='utf-8', errors='ignore').splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#') or line.startswith(';'):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == 'dev':
+            return parts[1]
+    return ''
+
+
+def _expected_dev(cfg):
+    manual = cfg.get('device')
+    if manual and manual != 'auto':
+        return manual
+    dev = _config_dev(cfg.get('config_path'))
+    if dev:
+        return dev
+    return _first_tunnel_dev()
+
+
+def _ready_dev(cfg):
+    dev = _expected_dev(cfg)
+    if _dev_exists(dev):
+        return dev
+    dev = _first_tunnel_dev()
+    if _dev_exists(dev):
+        return dev
+    return ''
 
 
 def enable(core, cfg):
@@ -70,34 +119,6 @@ def enable(core, cfg):
     cfg['device'] = _ask('VPN device, or auto', cfg.get('device', 'auto'))
 
 
-def _get_dev(cfg):
-    manual = cfg.get('device')
-    if manual and manual != 'auto':
-        return manual
-
-    iface = cfg.get('interface', 'vpnclient')
-    raw = _out(['ubus', 'call', f'network.interface.{iface}', 'status'])
-    if raw:
-        try:
-            data = json.loads(raw)
-            dev = data.get('l3_device') or data.get('device')
-            if dev:
-                return dev
-        except Exception:
-            pass
-
-    dev = _out(['uci', '-q', 'get', f'network.{iface}.device'])
-    if dev:
-        return dev
-
-    links = _out(['ip', '-o', 'link', 'show']).splitlines()
-    for line in links:
-        name = line.split(':', 2)[1].strip().split('@', 1)[0]
-        if name.startswith('tun') or name.startswith('tap') or name.startswith('ovpn') or name.startswith('wg'):
-            return name
-    return ''
-
-
 def render(core, cfg):
     return []
 
@@ -115,14 +136,6 @@ def apply(core, cfg):
         _run(['/etc/init.d/openvpn', 'enable'])
         _run(['/etc/init.d/openvpn', 'restart'])
 
-    _run(['uci', '-q', 'delete', f'network.{iface}'])
-    _run(['uci', 'set', f'network.{iface}=interface'])
-    _run(['uci', 'set', f'network.{iface}.proto=none'])
-    dev = _get_dev(cfg)
-    if dev:
-        _run(['uci', 'set', f'network.{iface}.device={dev}'])
-    _run(['uci', 'commit', 'network'])
-
     table_id = str(cfg['table_id'])
     table_name = str(cfg['table_name'])
     mark = str(cfg['mark'])
@@ -135,19 +148,29 @@ def apply(core, cfg):
         with rt.open('a', encoding='utf-8') as f:
             f.write(f'{table_id} {table_name}\n')
 
-    dev = _get_dev(cfg)
-    if dev:
-        rules = _out(['ip', 'rule', 'show'])
-        needle = f'fwmark {mark}/{mask} lookup {table_name}'
-        if needle not in rules:
-            _run(['ip', 'rule', 'add', 'fwmark', f'{mark}/{mask}', 'table', table_name, 'priority', prio])
-        _run(['ip', 'route', 'replace', 'default', 'dev', dev, 'table', table_name])
+    dev = _ready_dev(cfg)
+    if not dev:
+        print('openvpn: device is not ready yet')
+        return
+
+    _run(['uci', '-q', 'delete', f'network.{iface}'])
+    _run(['uci', 'set', f'network.{iface}=interface'])
+    _run(['uci', 'set', f'network.{iface}.proto=none'])
+    _run(['uci', 'set', f'network.{iface}.device={dev}'])
+    _run(['uci', 'commit', 'network'])
+
+    rules = _out(['ip', 'rule', 'show'])
+    needle = f'fwmark {mark}/{mask} lookup {table_name}'
+    if needle not in rules:
+        _run(['ip', 'rule', 'add', 'fwmark', f'{mark}/{mask}', 'table', table_name, 'priority', prio])
+    _run(['ip', 'route', 'replace', 'default', 'dev', dev, 'table', table_name])
 
 
 def status(core, cfg):
     return {
         'interface': cfg.get('interface'),
-        'device': _get_dev(cfg) or '-',
+        'device': _ready_dev(cfg) or 'not-ready',
+        'expected_device': _expected_dev(cfg) or '-',
         'config': cfg.get('config_path'),
         'table': cfg.get('table_name'),
     }
