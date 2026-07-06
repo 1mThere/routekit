@@ -1,16 +1,19 @@
 from pathlib import Path
+from subprocess import run, PIPE
 
 PRIORITY = 10
 DEFAULTS = {
     'domain': 'v.be',
     'ip': '192.168.1.2',
+    'prefixlen': 24,
     'home': '/www-routekit',
     'lan_device': 'br-lan',
 }
 
 
-def _run(argv, check=False):
-    from subprocess import run
+def _run(argv, check=False, capture=False):
+    if capture:
+        return run(argv, check=check, text=True, stdout=PIPE, stderr=PIPE)
     return run(argv, check=check)
 
 
@@ -56,10 +59,19 @@ code{{background:#080b0f;border:1px solid #303744;border-radius:6px;padding:2px 
     return ['dnsmasq']
 
 
+def _runtime_add_ip(ip, prefixlen, dev):
+    addr = f'{ip}/{prefixlen}'
+    current = _run(['ip', '-4', 'addr', 'show', 'dev', dev], capture=True)
+    if current.returncode == 0 and addr in current.stdout:
+        return
+    _run(['ip', 'addr', 'add', addr, 'dev', dev])
+
+
 def apply(core, cfg):
     ip = cfg['ip']
     home = cfg['home']
     lan_device = cfg.get('lan_device', 'br-lan')
+    prefixlen = int(cfg.get('prefixlen', 24))
 
     _run(['uci', '-q', 'delete', 'network.routekit_portal'])
     _run(['uci', 'set', 'network.routekit_portal=interface'])
@@ -69,6 +81,8 @@ def apply(core, cfg):
     _run(['uci', 'set', 'network.routekit_portal.netmask=255.255.255.0'])
     _run(['uci', 'commit', 'network'])
 
+    _runtime_add_ip(ip, prefixlen, lan_device)
+
     _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
     _run(['uci', 'set', 'uhttpd.routekit=uhttpd'])
     _run(['uci', 'set', f'uhttpd.routekit.home={home}'])
@@ -76,7 +90,6 @@ def apply(core, cfg):
     _run(['uci', 'set', 'uhttpd.routekit.cgi_prefix=/cgi-bin'])
     _run(['uci', 'commit', 'uhttpd'])
 
-    _run(['/etc/init.d/network', 'restart'])
     _run(['/etc/init.d/uhttpd', 'restart'])
 
 
