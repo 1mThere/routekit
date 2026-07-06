@@ -217,6 +217,20 @@ def render(core, cfg):
     return ['dnsmasq'] if changed else []
 
 
+def _runtime_cleanup_ip(ip, keep_prefixlen, dev):
+    keep = f'{ip}/{keep_prefixlen}'
+    current = _run(['ip', '-o', '-4', 'addr', 'show', 'dev', dev], capture=True)
+    if current.returncode != 0:
+        return
+    for line in current.stdout.splitlines():
+        parts = line.split()
+        if 'inet' not in parts:
+            continue
+        addr = parts[parts.index('inet') + 1]
+        if addr.startswith(f'{ip}/') and addr != keep:
+            _run(['ip', 'addr', 'del', addr, 'dev', dev])
+
+
 def _runtime_add_ip(ip, prefixlen, dev):
     addr = f'{ip}/{prefixlen}'
     current = _run(['ip', '-4', 'addr', 'show', 'dev', dev], capture=True)
@@ -233,6 +247,9 @@ def _write_hotplug(cfg):
     _write(path, f'''#!/bin/sh
 [ "$ACTION" = "ifup" ] || [ "$ACTION" = "ifupdate" ] || exit 0
 [ "$DEVICE" = "{dev}" ] || [ "$INTERFACE" = "lan" ] || exit 0
+for addr in $(ip -o -4 addr show dev "{dev}" | awk '{{print $4}}' | grep '^{ip}/'); do
+  [ "$addr" = "{ip}/{prefixlen}" ] || ip addr del "$addr" dev "{dev}" 2>/dev/null
+done
 ip -4 addr show dev "{dev}" | grep -q "{ip}/{prefixlen}" && exit 0
 ip addr replace "{ip}/{prefixlen}" dev "{dev}" 2>/dev/null
 exit 0
@@ -275,6 +292,7 @@ def apply(core, cfg):
     lan_device = cfg.get('lan_device', 'br-lan')
     prefixlen = _portal_prefixlen(cfg)
 
+    _runtime_cleanup_ip(ip, prefixlen, lan_device)
     _runtime_add_ip(ip, prefixlen, lan_device)
     _write_hotplug(cfg)
     _cleanup_old_network()
