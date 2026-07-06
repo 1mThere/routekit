@@ -1,18 +1,40 @@
+import importlib.util
+import urllib.request
 from pathlib import Path
 
-from .config import load_config, save_config, module_cfg
+from .config import MODULE_DIR, load_config, module_cfg, save_config
 from .system import service_restart
-from .modules.domain_vpn import DomainVpnModule
-from .modules.provider_openwrt_iface import ProviderOpenwrtIfaceModule
-from .modules.portal_static import PortalStaticModule
-from .modules.zapret_stub import ZapretStubModule
 
-MODULES = {
-    'provider_openwrt_iface': ProviderOpenwrtIfaceModule,
-    'domain_vpn': DomainVpnModule,
-    'portal_static': PortalStaticModule,
-    'zapret_stub': ZapretStubModule,
-}
+
+STAGES = ('preflight', 'render', 'apply')
+
+
+class LoadedModule:
+    def __init__(self, name, py_module, core):
+        self.name = name
+        self.py = py_module
+        self.core = core
+        self.priority = int(getattr(py_module, 'PRIORITY', 100))
+        self.defaults = getattr(py_module, 'DEFAULTS', {})
+
+    def cfg(self):
+        cfg = module_cfg(self.core.config, self.name)
+        for k, v in self.defaults.items():
+            cfg.setdefault(k, v)
+        return cfg
+
+    def call(self, stage):
+        fn = getattr(self.py, stage, None)
+        if not fn:
+            return []
+        result = fn(self.core, self.cfg())
+        return result or []
+
+    def status(self):
+        fn = getattr(self.py, 'status', None)
+        if not fn:
+            return {}
+        return fn(self.core, self.cfg()) or {}
 
 
 class Core:
@@ -22,6 +44,20 @@ class Core:
     def save(self):
         save_config(self.config)
 
+    def init(self):
+        Path('/etc/routekit/lists').mkdir(parents=True, exist_ok=True)
+        MODULE_DIR.mkdir(parents=True, exist_ok=True)
+        std = Path('/etc/routekit/lists/standard.txt')
+        if not std.exists():
+            std.write_text('', encoding='utf-8')
+        self.save()
+
+    def registry(self):
+        return self.config.setdefault('registry', {})
+
+    def enabled_names(self):
+        return list(self.config.setdefault('enabled_modules', []))
+
     def module_config(self, name, defaults=None):
         cfg = module_cfg(self.config, name)
         if defaults:
@@ -29,78 +65,127 @@ class Core:
                 cfg.setdefault(k, v)
         return cfg
 
-    def modules(self, only_enabled=False):
-        items = []
-        for name, cls in MODULES.items():
-            mod = cls(self)
-            if only_enabled and not mod.enabled():
-                continue
-            items.append(mod)
-        return sorted(items, key=lambda m: m.priority)
+    def module_path(self, name):
+        return MODULE_DIR / f'{name}.py'
 
-    def init(self):
-        Path('/etc/routekit/lists').mkdir(parents=True, exist_ok=True)
-        Path('/var/lib/routekit').mkdir(parents=True, exist_ok=True)
-        std = Path('/etc/routekit/lists/standard.txt')
-        if not std.exists():
-            std.write_text('', encoding='utf-8')
-        self.save()
+    def ensure_module_downloaded(self, name):
+        reg = self.registry().get(name)
+        if not reg:
+            raise SystemExit(f'unknown module: {name}')
+        if not reg.get('implemented', True):
+            raise SystemExit(f'module {name} is not implemented yet')
+
+        path = self.module_path(name)
+        if path.exists():
+            return path
+
+        url = reg.get('url')
+        if not url:
+            raise SystemExit(f'module {name} has no download url')
+
+        MODULE_DIR.mkdir(parents=True, exist_ok=True)
+        print(f'downloading module {name}: {url}')
+        with urllib.request.urlopen(url, timeout=30) as r:
+            data = r.read().decode('utf-8')
+        path.write_text(data, encoding='utf-8')
+        return path
+
+    def load_module(self, name):
+        path = self.ensure_module_downloaded(name)
+        spec = importlib.util.spec_from_file_location(f'routekit_runtime_{name}', path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return LoadedModule(name, mod, self)
+
+    def modules(self, only_enabled=False):
+        if only_enabled:
+            names = self.enabled_names()
+        else:
+            names = sorted(self.registry())
+        loaded = []
+        for name in names:
+            if only_enabled or self.module_path(name).exists():
+                try:
+                    loaded.append(self.load_module(name))
+                except SystemExit:
+                    if only_enabled:
+                        raise
+        return sorted(loaded, key=lambda m: m.priority)
 
     def enable_module(self, name):
-        if name not in MODULES:
+        reg = self.registry().get(name)
+        if not reg:
             raise SystemExit(f'unknown module: {name}')
-        cfg = self.module_config(name, MODULES[name].defaults)
-        cfg['enabled'] = True
+        if not reg.get('implemented', True):
+            raise SystemExit(f'module {name} is not implemented yet')
+
+        missing = [d for d in reg.get('deps', []) if d not in self.enabled_names()]
+        if missing:
+            raise SystemExit(f'module {name} requires: {", ".join(missing)}')
+
+        mod = self.load_module(name)
+        cfg = mod.cfg()
+        fn = getattr(mod.py, 'enable', None)
+        if fn:
+            fn(self, cfg)
+        if name not in self.enabled_names():
+            self.config['enabled_modules'].append(name)
         self.save()
+        self.apply()
 
     def disable_module(self, name):
-        if name not in MODULES:
-            raise SystemExit(f'unknown module: {name}')
-        cfg = self.module_config(name, MODULES[name].defaults)
-        cfg['enabled'] = False
+        enabled = self.enabled_names()
+        if name in enabled:
+            enabled.remove(name)
         self.save()
+        self.apply()
 
     def set_module_value(self, name, key, value):
-        if name not in MODULES:
-            raise SystemExit(f'unknown module: {name}')
-        cfg = self.module_config(name, MODULES[name].defaults)
-        if value.lower() in ('true', 'yes', 'on'):
-            v = True
-        elif value.lower() in ('false', 'no', 'off'):
-            v = False
+        if name not in self.enabled_names():
+            raise SystemExit(f'module is not enabled: {name}')
+        mod = self.load_module(name)
+        cfg = mod.cfg()
+        if isinstance(value, str) and value.lower() in ('true', 'yes', 'on'):
+            value = True
+        elif isinstance(value, str) and value.lower() in ('false', 'no', 'off'):
+            value = False
         else:
             try:
-                v = int(value, 0)
-            except ValueError:
-                v = value
-        cfg[key] = v
+                value = int(value, 0)
+            except Exception:
+                pass
+        cfg[key] = value
         self.save()
 
     def apply(self):
+        mods = self.modules(only_enabled=True)
+
         errors = []
-        for mod in self.modules(only_enabled=True):
-            errors.extend(mod.preflight())
+        for mod in mods:
+            errors.extend(mod.call('preflight'))
         if errors:
             for e in errors:
                 print(f'error: {e}')
             raise SystemExit(1)
 
         services = set()
-        for mod in self.modules(only_enabled=True):
-            services.update(mod.render())
+        for mod in mods:
+            services.update(mod.call('render'))
         for svc in sorted(services):
             service_restart(svc)
-        for mod in self.modules(only_enabled=True):
-            mod.apply()
+        for mod in mods:
+            mod.call('apply')
 
     def doctor(self):
         print('routekit doctor')
-        print(f'lan_iface: {self.config.get("lan_iface")}')
+        print(f'enabled: {", ".join(self.enabled_names()) or "none"}')
         print()
-        for mod in self.modules():
-            cfg = mod.cfg()
-            print(f'[{mod.name}] enabled={cfg.get("enabled", False)}')
-            st = mod.status()
-            for k, v in st.items():
-                print(f'  {k}: {v}')
+        for name, reg in sorted(self.registry().items()):
+            enabled = name in self.enabled_names()
+            installed = self.module_path(name).exists()
+            print(f'[{name}] enabled={enabled} downloaded={installed}')
+            if enabled:
+                mod = self.load_module(name)
+                for k, v in mod.status().items():
+                    print(f'  {k}: {v}')
             print()
