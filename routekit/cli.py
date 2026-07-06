@@ -1,11 +1,12 @@
 import argparse
+import ipaddress
 import subprocess
 import tempfile
 from pathlib import Path
 
 from .config import CONFIG_PATH
 from .core import Core
-from .domains import normalize_many, read_list, write_list
+from .domains import normalize_domain, normalize_many, read_list, write_list
 
 ARCHIVE_URL = 'https://github.com/1mThere/routekit/archive/refs/heads/main.tar.gz'
 
@@ -55,6 +56,64 @@ def cmd_modules(args):
 
 def list_path():
     return Path('/etc/routekit/lists/standard.txt')
+
+
+def _normalize_stlist(items):
+    out = set()
+    for item in items:
+        for part in str(item).replace(',', ' ').split():
+            value = part.strip().lower()
+            if not value or value.startswith('#'):
+                continue
+            try:
+                net = ipaddress.ip_network(value, strict=False)
+                if net.version == 4:
+                    if net.prefixlen == 32:
+                        out.add(str(net.network_address))
+                    else:
+                        out.add(str(net))
+                    continue
+            except Exception:
+                pass
+            domain = normalize_domain(value)
+            if domain:
+                out.add(domain)
+    return sorted(out)
+
+
+def _read_stlist(path):
+    path = Path(path)
+    if not path.exists():
+        return []
+    return _normalize_stlist(path.read_text(encoding='utf-8', errors='ignore').splitlines())
+
+
+def _write_stlist(path, items):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    items = sorted(set(items))
+    path.write_text('\n'.join(items) + ('\n' if items else ''), encoding='utf-8')
+
+
+def cmd_vpn(args):
+    p = list_path()
+    current = _read_stlist(p)
+    if args.vpn_cmd == 'stlist':
+        if args.stlist_cmd == 'list':
+            for i, item in enumerate(current, 1):
+                print(f'{i:6d}  {item}')
+        elif args.stlist_cmd == 'add':
+            items = _normalize_stlist(args.items)
+            _write_stlist(p, sorted(set(current) | set(items)))
+            print(f'added: {len(items)}')
+        elif args.stlist_cmd == 'del':
+            items = set(_normalize_stlist(args.items))
+            _write_stlist(p, [x for x in current if x not in items])
+            print(f'deleted: {len(items)}')
+        elif args.stlist_cmd == 'replace':
+            items = _normalize_stlist(args.items)
+            _write_stlist(p, items)
+            print(f'replaced: {len(items)}')
 
 
 def cmd_domain(args):
@@ -163,6 +222,22 @@ def build_parser():
     x.add_argument('name', nargs='?')
     x.add_argument('--all', action='store_true')
     x.set_defaults(func=cmd_modules)
+
+    s = sub.add_parser('vpn')
+    vsub = s.add_subparsers(dest='vpn_cmd', required=True)
+    x = vsub.add_parser('stlist')
+    st = x.add_subparsers(dest='stlist_cmd', required=True)
+    y = st.add_parser('list')
+    y.set_defaults(func=cmd_vpn)
+    y = st.add_parser('add')
+    y.add_argument('items', nargs='+')
+    y.set_defaults(func=cmd_vpn)
+    y = st.add_parser('del')
+    y.add_argument('items', nargs='+')
+    y.set_defaults(func=cmd_vpn)
+    y = st.add_parser('replace')
+    y.add_argument('items', nargs='+')
+    y.set_defaults(func=cmd_vpn)
 
     s = sub.add_parser('domain')
     dsub = s.add_subparsers(dest='domain_cmd', required=True)
