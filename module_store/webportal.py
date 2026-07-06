@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 from subprocess import run, PIPE
 
@@ -11,6 +12,7 @@ DEFAULTS = {
     'lan_ip': 'auto',
     'users_dir': '/etc/routekit/users',
     'hotplug': '/etc/hotplug.d/iface/90-routekit-webportal-ip',
+    'uhttpd_backup': '/etc/routekit/backups/uhttpd.before-webportal',
 }
 
 
@@ -48,6 +50,18 @@ def _write(path, data, mode=None):
             path.chmod(mode)
             changed = True
     return changed
+
+
+def _remove(path):
+    path = Path(path)
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+        return True
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
 
 
 def _ask(prompt, default):
@@ -218,7 +232,17 @@ def render(core, cfg):
 
 
 def _runtime_cleanup_ip(ip, keep_prefixlen, dev):
-    _run(['ip', '-4', 'addr', 'flush', 'dev', dev, 'to', f'{ip}/32'])
+    current = _run(['ip', '-o', '-4', 'addr', 'show', 'dev', dev], capture=True)
+    if current.returncode != 0:
+        return
+    for line in current.stdout.splitlines():
+        parts = line.split()
+        if 'inet' not in parts:
+            continue
+        addr = parts[parts.index('inet') + 1]
+        host = addr.split('/', 1)[0]
+        if host == ip:
+            _run(['ip', 'addr', 'del', addr, 'dev', dev])
 
 
 def _runtime_add_ip(ip, prefixlen, dev):
@@ -234,7 +258,11 @@ def _write_hotplug(cfg):
     _write(path, f'''#!/bin/sh
 [ "$ACTION" = "ifup" ] || [ "$ACTION" = "ifupdate" ] || exit 0
 [ "$DEVICE" = "{dev}" ] || [ "$INTERFACE" = "lan" ] || exit 0
-ip -4 addr flush dev "{dev}" to "{ip}/32" 2>/dev/null
+for addr in $(ip -o -4 addr show dev "{dev}" | awk '{{print $4}}'); do
+  host="${{addr%%/*}}"
+  [ "$host" = "{ip}" ] || continue
+  ip addr del "$addr" dev "{dev}" 2>/dev/null
+done
 ip addr replace "{ip}/{prefixlen}" dev "{dev}" 2>/dev/null
 exit 0
 ''', 0o755)
@@ -246,12 +274,45 @@ def _cleanup_old_network():
         _run(['uci', 'commit', 'network'])
 
 
+def _backup_uhttpd(cfg):
+    src = Path('/etc/config/uhttpd')
+    backup = Path(cfg.get('uhttpd_backup', '/etc/routekit/backups/uhttpd.before-webportal'))
+    if src.exists() and not backup.exists():
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, backup)
+
+
+def _restore_uhttpd(cfg):
+    backup = Path(cfg.get('uhttpd_backup', '/etc/routekit/backups/uhttpd.before-webportal'))
+    dst = Path('/etc/config/uhttpd')
+    if backup.exists():
+        shutil.copy2(backup, dst)
+        return
+    rom = Path('/rom/etc/config/uhttpd')
+    if rom.exists():
+        shutil.copy2(rom, dst)
+        return
+    _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
+    _run(['uci', '-q', 'set', 'uhttpd.main=uhttpd'])
+    _run(['uci', '-q', 'delete', 'uhttpd.main.listen_http'])
+    _run(['uci', '-q', 'delete', 'uhttpd.main.listen_https'])
+    _run(['uci', 'add_list', 'uhttpd.main.listen_http=0.0.0.0:80'])
+    _run(['uci', 'add_list', 'uhttpd.main.listen_http=[::]:80'])
+    _run(['uci', 'add_list', 'uhttpd.main.listen_https=0.0.0.0:443'])
+    _run(['uci', 'add_list', 'uhttpd.main.listen_https=[::]:443'])
+    _run(['uci', 'set', 'uhttpd.main.home=/www'])
+    _run(['uci', 'set', 'uhttpd.main.cgi_prefix=/cgi-bin'])
+    _run(['uci', 'set', 'uhttpd.main.redirect_https=0'])
+    _run(['uci', 'commit', 'uhttpd'])
+
+
 def _bind_uhttpd(cfg):
     portal_ip = cfg['ip']
     lan_ip = _lan_ip(cfg)
     home = cfg['home']
     before = _out(['uci', 'show', 'uhttpd'])
 
+    _backup_uhttpd(cfg)
     _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
     _run(['uci', 'set', 'uhttpd.routekit=uhttpd'])
     _run(['uci', 'add_list', f'uhttpd.routekit.listen_http={portal_ip}:80'])
@@ -282,6 +343,17 @@ def apply(core, cfg):
     _cleanup_old_network()
     if _bind_uhttpd(cfg):
         _run(['/etc/init.d/uhttpd', 'restart'])
+
+
+def cleanup(core, cfg):
+    _runtime_cleanup_ip(cfg.get('ip', '192.168.1.2'), 32, cfg.get('lan_device', 'br-lan'))
+    _remove(cfg.get('hotplug', '/etc/hotplug.d/iface/90-routekit-webportal-ip'))
+    _remove(Path(cfg.get('home', '/www-routekit')))
+    _remove(Path(core.config['dnsmasq_confdir']) / 'routekit-webportal.conf')
+    _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
+    _restore_uhttpd(cfg)
+    _run(['/etc/init.d/uhttpd', 'enable'])
+    return ['dnsmasq', 'uhttpd']
 
 
 def status(core, cfg):
