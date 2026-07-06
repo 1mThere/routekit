@@ -85,7 +85,7 @@ def _tile(providers):
     options = ''.join(f'<option value="{p}">{p}</option>' for p in providers)
     return f'''<section class="tile" id="vpn-tile">
 <h2>VPN</h2>
-<form id="vpn-form" method="post" action="/cgi-bin/routekit-vpn">
+<form id="vpn-form">
 <label>Режим
 <select name="mode">
 <option value="direct">напрямую</option>
@@ -99,7 +99,29 @@ def _tile(providers):
 </select>
 </label>
 <button type="submit">Сохранить</button>
+<p class="status" id="vpn-status"></p>
 </form>
+<script>
+(() => {{
+  const api = '/cgi-bin/routekit-vpn';
+  const form = document.getElementById('vpn-form');
+  const status = document.getElementById('vpn-status');
+  function setStatus(text, cls) {{ status.textContent = text; status.className = 'status ' + (cls || ''); }}
+  function fill(data) {{
+    if (!data.ok) {{ setStatus(data.error || 'Ошибка', 'err'); return; }}
+    if (form.mode.querySelector('option[value="' + data.mode + '"]')) form.mode.value = data.mode;
+    if (form.provider.querySelector('option[value="' + data.provider + '"]')) form.provider.value = data.provider;
+    setStatus(data.saved ? 'Сохранено' : '', data.saved ? 'ok' : '');
+  }}
+  fetch(api, {{cache:'no-store'}}).then(r => r.json()).then(fill).catch(e => setStatus('API не ответил', 'err'));
+  form.addEventListener('submit', e => {{
+    e.preventDefault();
+    setStatus('Сохранение...');
+    fetch(api, {{method:'POST', body:new URLSearchParams(new FormData(form))}})
+      .then(r => r.json()).then(fill).catch(e => setStatus('Не сохранилось', 'err'));
+  }});
+}})();
+</script>
 </section>'''
 
 
@@ -159,6 +181,7 @@ data['ip'] = ip
 data['mac'] = mac
 data.setdefault('mode', 'direct')
 data.setdefault('provider', {default_provider!r})
+saved = False
 if os.environ.get('REQUEST_METHOD') == 'POST':
     form = read_post()
     mode = (form.get('mode') or [''])[0]
@@ -167,9 +190,14 @@ if os.environ.get('REQUEST_METHOD') == 'POST':
         data['mode'] = mode
     if provider in PROVIDERS:
         data['provider'] = provider
+    saved = True
 path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-respond({{'ok': True, 'mode': data['mode'], 'provider': data['provider']}})
+respond({{'ok': True, 'mode': data['mode'], 'provider': data['provider'], 'saved': saved}})
 '''
+
+
+def _web_home(core):
+    return Path(core.config.get('modules', {}).get('webportal', {}).get('home', '/www-routekit'))
 
 
 def enable(core, cfg):
@@ -180,7 +208,8 @@ def enable(core, cfg):
 def render(core, cfg):
     providers = cfg.get('providers') or ['openvpn', 'wireguard', 'vless']
     _add_tile(core, _tile(providers))
-    _write(Path('/www-routekit/cgi-bin/routekit-vpn'), _api(cfg['users_dir'], cfg.get('provider', providers[0]), providers), 0o755)
+    home = _web_home(core)
+    _write(home / 'cgi-bin' / 'routekit-vpn', _api(cfg['users_dir'], cfg.get('provider', providers[0]), providers), 0o755)
 
     domains = _domains(cfg['list_path'])
     users = _users(cfg['users_dir'])
