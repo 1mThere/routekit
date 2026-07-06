@@ -1,6 +1,5 @@
 import importlib.util
 import subprocess
-import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -98,7 +97,7 @@ class Core:
             tmp.unlink()
         raise SystemExit('cannot download module ' + name + '\n' + '\n'.join(errors))
 
-    def ensure_module_downloaded(self, name):
+    def ensure_module_downloaded(self, name, force=False):
         reg = self.registry().get(name)
         if not reg:
             raise SystemExit(f'unknown module: {name}')
@@ -106,7 +105,7 @@ class Core:
             raise SystemExit(f'module {name} is not implemented yet')
 
         path = self.module_path(name)
-        if path.exists():
+        if path.exists() and not force:
             return path
 
         url = reg.get('url')
@@ -114,9 +113,23 @@ class Core:
             raise SystemExit(f'module {name} has no download url')
 
         MODULE_DIR.mkdir(parents=True, exist_ok=True)
-        print(f'downloading module {name}: {url}')
+        action = 'refreshing' if path.exists() else 'downloading'
+        print(f'{action} module {name}: {url}')
         self.download_module(name, url, path)
         return path
+
+    def refresh_module(self, name):
+        return self.ensure_module_downloaded(name, force=True)
+
+    def refresh_modules(self, enabled_only=True):
+        if enabled_only:
+            names = self.enabled_names()
+        else:
+            names = sorted(self.registry())
+        for name in names:
+            reg = self.registry().get(name, {})
+            if reg.get('implemented', True):
+                self.refresh_module(name)
 
     def load_module(self, name):
         path = self.ensure_module_downloaded(name)
