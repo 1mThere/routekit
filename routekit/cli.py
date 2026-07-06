@@ -146,12 +146,31 @@ def cmd_doctor(args):
     Core().doctor()
 
 
-def _run(argv):
-    subprocess.run(argv, check=True)
+def _run(argv, label=None):
+    p = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if p.stdout:
+        print(p.stdout, end='')
+    if p.returncode != 0:
+        msg = (p.stderr or '').strip() or f'exit code {p.returncode}'
+        name = label or argv[0]
+        raise SystemExit(f'{name} failed: {msg}')
+    return p
 
 
 def _download_archive(dst):
-    _run(['curl', '-fL', '--connect-timeout', '20', '--max-time', '240', ARCHIVE_URL, '-o', str(dst)])
+    _run([
+        'curl',
+        '-fsSL',
+        '--retry', '3',
+        '--retry-delay', '1',
+        '--retry-all-errors',
+        '--connect-timeout', '8',
+        '--max-time', '60',
+        '--speed-time', '10',
+        '--speed-limit', '1024',
+        ARCHIVE_URL,
+        '-o', str(dst),
+    ], 'download update')
 
 
 def _install_from_archive():
@@ -159,14 +178,14 @@ def _install_from_archive():
         root = Path(d)
         archive = root / 'routekit.tar.gz'
         _download_archive(archive)
-        _run(['tar', '-xzf', str(archive), '-C', str(root)])
+        _run(['tar', '-xzf', str(archive), '-C', str(root)], 'unpack update')
         source = root / 'routekit-main'
-        _run(['python3', str(source / 'install.py'), '--source', str(source)])
+        _run(['python3', str(source / 'install.py'), '--source', str(source)], 'install update')
 
 
 def _install_from_git(repo):
-    _run(['git', '-C', str(repo), 'pull', '--ff-only'])
-    _run(['python3', str(repo / 'install.py'), '--source', str(repo)])
+    _run(['git', '-C', str(repo), 'pull', '--ff-only'], 'git update')
+    _run(['python3', str(repo / 'install.py'), '--source', str(repo)], 'install update')
 
 
 def cmd_update(args):
@@ -175,9 +194,9 @@ def cmd_update(args):
         _install_from_git(repo)
     else:
         _install_from_archive()
-    _run(['/usr/bin/rk', 'modules', 'update'])
+    _run(['/usr/bin/rk', 'modules', 'update'], 'modules update')
     if not args.no_apply:
-        _run(['/usr/bin/rk', 'apply'])
+        _run(['/usr/bin/rk', 'apply'], 'apply')
     print('routekit updated')
 
 
