@@ -37,8 +37,16 @@ def enable(core, cfg):
     cfg['home'] = cfg.get('home', '/www-routekit')
 
 
+def _ensure_dnsmasq_confdir(path):
+    _run(['uci', '-q', 'del_list', f'dhcp.@dnsmasq[0].confdir={path}'])
+    _run(['uci', 'add_list', f'dhcp.@dnsmasq[0].confdir={path}'])
+    _run(['uci', 'commit', 'dhcp'])
+
+
 def render(core, cfg):
     dnsmasq_dir = Path(core.config['dnsmasq_confdir'])
+    dnsmasq_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_dnsmasq_confdir(str(dnsmasq_dir))
     _write(dnsmasq_dir / 'routekit-webportal.conf', f'address=/{cfg["domain"]}/{cfg["ip"]}\n')
 
     home = Path(cfg['home'])
