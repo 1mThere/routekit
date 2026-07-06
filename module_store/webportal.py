@@ -5,15 +5,15 @@ from subprocess import run, PIPE
 PRIORITY = 1000
 DEFAULTS = {
     'domain': 'v.be',
-    'ip': '192.168.1.2',
+    'ip': 'auto',
     'port': 80,
-    'prefixlen': 32,
-    'home': '/www-routekit',
+    'home': '/www',
     'lan_device': 'br-lan',
     'lan_ip': 'auto',
     'users_dir': '/etc/routekit/users',
     'hotplug': '/etc/hotplug.d/iface/90-routekit-webportal-ip',
     'uhttpd_backup': '/etc/routekit/backups/uhttpd.before-webportal',
+    'www_index_backup': '/etc/routekit/backups/www-index.before-webportal',
 }
 
 
@@ -65,24 +65,16 @@ def _remove(path):
         return False
 
 
+def _plain_ip(value, fallback='192.168.1.1'):
+    value = str(value or '').strip()
+    if not value or value == 'auto':
+        return fallback
+    return value.split('/', 1)[0]
+
+
 def _ask(prompt, default):
     value = input(f'{prompt} [{default}]: ').strip()
     return value or default
-
-
-def enable(core, cfg):
-    cfg['domain'] = _ask('portal domain', cfg.get('domain', 'v.be'))
-    cfg['ip'] = _ask('portal ip', cfg.get('ip', '192.168.1.2'))
-    cfg['port'] = 80
-    cfg['home'] = cfg.get('home', '/www-routekit')
-    cfg['users_dir'] = cfg.get('users_dir', '/etc/routekit/users')
-
-
-def _plain_ip(value, fallback='192.168.1.1'):
-    value = str(value or '').strip()
-    if not value:
-        return fallback
-    return value.split('/', 1)[0]
 
 
 def _lan_ip(cfg):
@@ -91,8 +83,19 @@ def _lan_ip(cfg):
     return _plain_ip(_out(['uci', '-q', 'get', 'network.lan.ipaddr']))
 
 
-def _portal_ip(cfg):
-    return _plain_ip(cfg.get('ip', '192.168.1.2'), '192.168.1.2')
+def _legacy_ip(cfg):
+    value = str(cfg.get('ip', '')).strip()
+    if value and value != 'auto':
+        return _plain_ip(value, '')
+    return '192.168.1.2'
+
+
+def enable(core, cfg):
+    cfg['domain'] = _ask('portal domain', cfg.get('domain', 'v.be'))
+    cfg['ip'] = 'auto'
+    cfg['port'] = 80
+    cfg['home'] = '/www'
+    cfg['users_dir'] = cfg.get('users_dir', '/etc/routekit/users')
 
 
 def _ensure_dnsmasq_confdir(path):
@@ -217,24 +220,36 @@ button{padding:11px 16px;border-radius:8px;border:1px solid #6f8cff;background:#
     return template.replace('__BODY__', body)
 
 
+def _backup_once(src, backup):
+    src = Path(src)
+    backup = Path(backup)
+    if src.exists() and not backup.exists():
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, backup)
+
+
 def render(core, cfg):
-    cfg['ip'] = _portal_ip(cfg)
+    cfg['ip'] = 'auto'
     cfg['port'] = 80
+    cfg['home'] = '/www'
+    lan_ip = _lan_ip(cfg)
     users_dir = Path(cfg.get('users_dir', '/etc/routekit/users'))
     users_dir.mkdir(parents=True, exist_ok=True)
+
     dnsmasq_dir = Path(core.config['dnsmasq_confdir'])
     dnsmasq_dir.mkdir(parents=True, exist_ok=True)
     changed = _ensure_dnsmasq_confdir(str(dnsmasq_dir))
-    changed |= _write(dnsmasq_dir / 'routekit-webportal.conf', f'address=/{cfg["domain"]}/{cfg["ip"]}\n')
-    home = Path(cfg['home'])
-    cgi = home / 'cgi-bin'
-    cgi.mkdir(parents=True, exist_ok=True)
-    _write(home / 'index.html', _index_html(list(getattr(core, 'portal_tiles', []))))
-    _write(cgi / 'routekit-user', _user_api(str(users_dir)), 0o755)
-    return ['dnsmasq'] if changed else []
+    changed |= _write(dnsmasq_dir / 'routekit-webportal.conf', f'address=/{cfg["domain"]}/{lan_ip}\n')
+
+    _backup_once('/www/index.html', cfg.get('www_index_backup', '/etc/routekit/backups/www-index.before-webportal'))
+    _write('/www/index.html', _index_html(list(getattr(core, 'portal_tiles', []))))
+    _write('/www/cgi-bin/routekit-user', _user_api(str(users_dir)), 0o755)
+    return ['dnsmasq', 'uhttpd']
 
 
 def _runtime_cleanup_ip(ip, dev):
+    if not ip:
+        return
     current = _run(['ip', '-o', '-4', 'addr', 'show', 'dev', dev], capture=True)
     if current.returncode != 0:
         return
@@ -247,29 +262,8 @@ def _runtime_cleanup_ip(ip, dev):
             _run(['ip', 'addr', 'del', addr, 'dev', dev])
 
 
-def _write_hotplug(cfg):
-    ip = _portal_ip(cfg)
-    dev = cfg.get('lan_device', 'br-lan')
-    path = cfg.get('hotplug', '/etc/hotplug.d/iface/90-routekit-webportal-ip')
-    _write(path, f'''#!/bin/sh
-[ "$ACTION" = "ifup" ] || [ "$ACTION" = "ifupdate" ] || exit 0
-[ "$DEVICE" = "{dev}" ] || [ "$INTERFACE" = "lan" ] || exit 0
-for addr in $(ip -o -4 addr show dev "{dev}" | awk '{{print $4}}'); do
-  host="${{addr%%/*}}"
-  [ "$host" = "{ip}" ] || continue
-  ip addr del "$addr" dev "{dev}" 2>/dev/null
-done
-ip addr replace "{ip}/32" dev "{dev}" 2>/dev/null
-exit 0
-''', 0o755)
-
-
 def _backup_uhttpd(cfg):
-    src = Path('/etc/config/uhttpd')
-    backup = Path(cfg.get('uhttpd_backup', '/etc/routekit/backups/uhttpd.before-webportal'))
-    if src.exists() and not backup.exists():
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, backup)
+    _backup_once('/etc/config/uhttpd', cfg.get('uhttpd_backup', '/etc/routekit/backups/uhttpd.before-webportal'))
 
 
 def _restore_uhttpd(cfg):
@@ -293,45 +287,44 @@ def _restore_uhttpd(cfg):
     _run(['uci', 'commit', 'uhttpd'])
 
 
+def _restore_www_index(cfg):
+    backup = Path(cfg.get('www_index_backup', '/etc/routekit/backups/www-index.before-webportal'))
+    if backup.exists():
+        shutil.copy2(backup, '/www/index.html')
+
+
 def _bind_uhttpd(cfg):
-    portal_ip = _portal_ip(cfg)
-    lan_ip = _lan_ip(cfg)
-    home = cfg['home']
     _backup_uhttpd(cfg)
     _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
-    _run(['uci', 'set', 'uhttpd.routekit=uhttpd'])
-    _run(['uci', 'add_list', f'uhttpd.routekit.listen_http={portal_ip}:80'])
-    _run(['uci', 'set', f'uhttpd.routekit.home={home}'])
-    _run(['uci', 'set', 'uhttpd.routekit.cgi_prefix=/cgi-bin'])
-    _run(['uci', 'set', 'uhttpd.routekit.redirect_https=0'])
     _run(['uci', '-q', 'set', 'uhttpd.main=uhttpd'])
     _run(['uci', '-q', 'delete', 'uhttpd.main.listen_http'])
     _run(['uci', '-q', 'delete', 'uhttpd.main.listen_https'])
-    _run(['uci', 'add_list', f'uhttpd.main.listen_http={lan_ip}:80'])
+    _run(['uci', 'add_list', 'uhttpd.main.listen_http=0.0.0.0:80'])
     _run(['uci', 'set', 'uhttpd.main.home=/www'])
     _run(['uci', 'set', 'uhttpd.main.cgi_prefix=/cgi-bin'])
     _run(['uci', 'set', 'uhttpd.main.redirect_https=0'])
+    _run(['uci', 'set', 'uhttpd.main.rfc1918_filter=0'])
     _run(['uci', 'commit', 'uhttpd'])
 
 
 def apply(core, cfg):
-    cfg['port'] = 80
-    cfg['ip'] = _portal_ip(cfg)
     dev = cfg.get('lan_device', 'br-lan')
-    _runtime_cleanup_ip(cfg['ip'], dev)
-    _run(['ip', 'addr', 'replace', f'{cfg["ip"]}/32', 'dev', dev])
-    _write_hotplug(cfg)
+    _runtime_cleanup_ip(_legacy_ip(cfg), dev)
+    _remove(cfg.get('hotplug', '/etc/hotplug.d/iface/90-routekit-webportal-ip'))
+    cfg['ip'] = 'auto'
+    cfg['port'] = 80
+    cfg['home'] = '/www'
     _bind_uhttpd(cfg)
     _run(['/etc/init.d/uhttpd', 'enable'])
     _run(['/etc/init.d/uhttpd', 'restart'])
 
 
 def cleanup(core, cfg):
-    _runtime_cleanup_ip(_portal_ip(cfg), cfg.get('lan_device', 'br-lan'))
+    _runtime_cleanup_ip(_legacy_ip(cfg), cfg.get('lan_device', 'br-lan'))
     _remove(cfg.get('hotplug', '/etc/hotplug.d/iface/90-routekit-webportal-ip'))
-    _remove(Path(cfg.get('home', '/www-routekit')))
+    _remove('/www/cgi-bin/routekit-user')
     _remove(Path(core.config['dnsmasq_confdir']) / 'routekit-webportal.conf')
-    _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
+    _restore_www_index(cfg)
     _restore_uhttpd(cfg)
     _run(['/etc/init.d/uhttpd', 'enable'])
     return ['dnsmasq', 'uhttpd']
@@ -340,13 +333,13 @@ def cleanup(core, cfg):
 def status(core, cfg):
     users_dir = Path(cfg.get('users_dir', '/etc/routekit/users'))
     users = len(list(users_dir.glob('*.json'))) if users_dir.exists() else 0
+    lan_ip = _lan_ip(cfg)
     return {
         'domain': cfg.get('domain'),
-        'ip': _portal_ip(cfg),
+        'ip': lan_ip,
         'port': 80,
-        'prefixlen': 32,
-        'home': cfg.get('home'),
+        'home': '/www',
         'users': users,
         'url': f'http://{cfg.get("domain")}',
-        'luci': f'http://{_lan_ip(cfg)}',
+        'luci': f'http://{lan_ip}/cgi-bin/luci',
     }
