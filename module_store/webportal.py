@@ -218,24 +218,11 @@ def render(core, cfg):
 
 
 def _runtime_cleanup_ip(ip, keep_prefixlen, dev):
-    keep = f'{ip}/{keep_prefixlen}'
-    current = _run(['ip', '-o', '-4', 'addr', 'show', 'dev', dev], capture=True)
-    if current.returncode != 0:
-        return
-    for line in current.stdout.splitlines():
-        parts = line.split()
-        if 'inet' not in parts:
-            continue
-        addr = parts[parts.index('inet') + 1]
-        if addr.startswith(f'{ip}/') and addr != keep:
-            _run(['ip', 'addr', 'del', addr, 'dev', dev])
+    _run(['ip', '-4', 'addr', 'flush', 'dev', dev, 'to', f'{ip}/32'])
 
 
 def _runtime_add_ip(ip, prefixlen, dev):
     addr = f'{ip}/{prefixlen}'
-    current = _run(['ip', '-4', 'addr', 'show', 'dev', dev], capture=True)
-    if current.returncode == 0 and addr in current.stdout:
-        return
     _run(['ip', 'addr', 'replace', addr, 'dev', dev])
 
 
@@ -247,10 +234,7 @@ def _write_hotplug(cfg):
     _write(path, f'''#!/bin/sh
 [ "$ACTION" = "ifup" ] || [ "$ACTION" = "ifupdate" ] || exit 0
 [ "$DEVICE" = "{dev}" ] || [ "$INTERFACE" = "lan" ] || exit 0
-for addr in $(ip -o -4 addr show dev "{dev}" | awk '{{print $4}}' | grep '^{ip}/'); do
-  [ "$addr" = "{ip}/{prefixlen}" ] || ip addr del "$addr" dev "{dev}" 2>/dev/null
-done
-ip -4 addr show dev "{dev}" | grep -q "{ip}/{prefixlen}" && exit 0
+ip -4 addr flush dev "{dev}" to "{ip}/32" 2>/dev/null
 ip addr replace "{ip}/{prefixlen}" dev "{dev}" 2>/dev/null
 exit 0
 ''', 0o755)
