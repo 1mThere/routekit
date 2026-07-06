@@ -1,10 +1,9 @@
+import ipaddress
 import json
 from pathlib import Path
 
 PRIORITY = 20
 DEFAULTS = {
-    'provider': 'openvpn',
-    'providers': ['openvpn', 'wireguard', 'vless'],
     'list_path': '/etc/routekit/lists/standard.txt',
     'users_dir': '/etc/routekit/users',
     'dst_set': 'rk_vpn_dst4',
@@ -34,16 +33,39 @@ def _write(path, data, mode=None):
     return changed
 
 
-def _domains(path):
+def _remove(path):
+    path = Path(path)
+    if path.exists():
+        path.unlink()
+        return True
+    return False
+
+
+def _list_items(path):
     p = Path(path)
     if not p.exists():
         return []
     out = []
     for line in p.read_text(encoding='utf-8', errors='ignore').splitlines():
-        d = line.strip().lower()
-        if d and not d.startswith('#'):
-            out.append(d)
+        item = line.strip().lower()
+        if item and not item.startswith('#'):
+            out.append(item)
     return sorted(set(out))
+
+
+def _split_items(items):
+    domains = []
+    ips = []
+    for item in items:
+        try:
+            net = ipaddress.ip_network(item, strict=False)
+            if net.version == 4:
+                ips.append(str(net.network_address) if net.prefixlen == 32 else str(net))
+                continue
+        except Exception:
+            pass
+        domains.append(item)
+    return sorted(set(domains)), sorted(set(ips))
 
 
 def _users(path):
@@ -75,24 +97,51 @@ def _set_block(name, ips=None):
         }}'''
 
 
+def _available_providers(core):
+    providers = []
+    for name in core.enabled_names():
+        if name in ('webportal', 'vpn'):
+            continue
+        try:
+            mod = core.load_module(name).py
+        except Exception:
+            continue
+        provider = getattr(mod, 'PROVIDER', None)
+        if provider:
+            providers.append(str(provider))
+    return sorted(set(providers))
+
+
 def _add_tile(core, html):
     if not hasattr(core, 'portal_tiles'):
         core.portal_tiles = []
     core.portal_tiles.append(html)
 
 
-def _tile(providers):
+def _tile_no_providers():
+    return '''<section class="tile" id="vpn-tile">
+<h2>VPN</h2>
+<p class="status">Провайдеров не найдено</p>
+</section>'''
+
+
+def _tile(providers, items):
     options = ''.join(f'<option value="{p}">{p}</option>' for p in providers)
+    st_items = '\n'.join(items) if items else 'список пуст'
     return f'''<section class="tile" id="vpn-tile">
 <h2>VPN</h2>
 <form id="vpn-form">
 <label>Режим
 <select name="mode">
 <option value="direct">напрямую</option>
-<option value="standard">список через VPN</option>
+<option value="standard">стандартный список через VPN</option>
 <option value="vpn_all">всё через VPN</option>
 </select>
 </label>
+<details id="vpn-stlist">
+<summary>Стандартный список</summary>
+<pre>{st_items}</pre>
+</details>
 <label>Протокол
 <select name="provider">
 {options}
@@ -106,13 +155,17 @@ def _tile(providers):
   const api = '/cgi-bin/routekit-vpn';
   const form = document.getElementById('vpn-form');
   const status = document.getElementById('vpn-status');
+  const stlist = document.getElementById('vpn-stlist');
   function setStatus(text, cls) {{ status.textContent = text; status.className = 'status ' + (cls || ''); }}
+  function syncList() {{ stlist.style.display = form.mode.value === 'standard' ? 'block' : 'none'; }}
   function fill(data) {{
     if (!data.ok) {{ setStatus(data.error || 'Ошибка', 'err'); return; }}
     if (form.mode.querySelector('option[value="' + data.mode + '"]')) form.mode.value = data.mode;
     if (form.provider.querySelector('option[value="' + data.provider + '"]')) form.provider.value = data.provider;
+    syncList();
     setStatus(data.saved ? 'Сохранено' : '', data.saved ? 'ok' : '');
   }}
+  form.mode.addEventListener('change', syncList);
   fetch(api, {{cache:'no-store'}}).then(r => r.json()).then(fill).catch(e => setStatus('API не ответил', 'err'));
   form.addEventListener('submit', e => {{
     e.preventDefault();
@@ -191,6 +244,8 @@ if os.environ.get('REQUEST_METHOD') == 'POST':
     if provider in PROVIDERS:
         data['provider'] = provider
     saved = True
+if data.get('provider') not in PROVIDERS:
+    data['provider'] = {default_provider!r}
 path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 respond({{'ok': True, 'mode': data['mode'], 'provider': data['provider'], 'saved': saved}})
 '''
@@ -201,17 +256,31 @@ def _web_home(core):
 
 
 def enable(core, cfg):
-    print('vpn module adds a VPN tile to the web portal.')
-    cfg['provider'] = input(f'provider [{cfg.get("provider", "openvpn")}]: ').strip() or cfg.get('provider', 'openvpn')
+    providers = _available_providers(core)
+    if providers:
+        print('vpn providers: ' + ', '.join(providers))
+    else:
+        print('vpn providers not found')
 
 
 def render(core, cfg):
-    providers = cfg.get('providers') or ['openvpn', 'wireguard', 'vless']
-    _add_tile(core, _tile(providers))
+    providers = _available_providers(core)
+    items = _list_items(cfg['list_path'])
+    domains, static_ips = _split_items(items)
     home = _web_home(core)
-    _write(home / 'cgi-bin' / 'routekit-vpn', _api(cfg['users_dir'], cfg.get('provider', providers[0]), providers), 0o755)
 
-    domains = _domains(cfg['list_path'])
+    if not providers:
+        _add_tile(core, _tile_no_providers())
+        changed = False
+        changed |= _remove(home / 'cgi-bin' / 'routekit-vpn')
+        changed |= _remove(Path(core.config['dnsmasq_confdir']) / 'routekit-vpn.conf')
+        changed |= _remove(Path(core.config['fw4_post_dir']) / '40-routekit-vpn.nft')
+        return ['firewall', 'dnsmasq'] if changed else []
+
+    default_provider = providers[0]
+    _add_tile(core, _tile(providers, items))
+    _write(home / 'cgi-bin' / 'routekit-vpn', _api(cfg['users_dir'], default_provider, providers), 0o755)
+
     users = _users(cfg['users_dir'])
     dnsmasq_dir = Path(core.config['dnsmasq_confdir'])
     fw4_dir = Path(core.config['fw4_post_dir'])
@@ -224,7 +293,7 @@ def render(core, cfg):
     all_ips = [u['ip'] for u in users if u.get('mode') == 'vpn_all']
     lan = core.config.get('lan_iface', 'br-lan')
     nft = f'''table inet fw4 {{
-{_set_block(cfg['dst_set'])}
+{_set_block(cfg['dst_set'], static_ips)}
 
 {_set_block(cfg['standard_src_set'], standard_ips)}
 
@@ -244,8 +313,9 @@ def render(core, cfg):
 
 def status(core, cfg):
     users = _users(cfg['users_dir'])
+    providers = _available_providers(core)
     return {
-        'provider': cfg.get('provider'),
-        'domains': len(_domains(cfg['list_path'])),
+        'providers': ', '.join(providers) if providers else '-',
+        'list': len(_list_items(cfg['list_path'])),
         'users': len(users),
     }
