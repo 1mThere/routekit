@@ -1,10 +1,14 @@
 import argparse
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .config import CONFIG_PATH
 from .core import Core
 from .domains import normalize_many, read_list, write_list
+
+ARCHIVE_URL = 'https://github.com/1mThere/routekit/archive/refs/heads/main.tar.gz'
 
 
 def cmd_init(args):
@@ -42,6 +46,12 @@ def cmd_module(args):
         mod = c.load_module(args.name)
         for k, v in mod.status().items():
             print(f'{k}: {v}')
+    elif args.module_cmd == 'refresh':
+        if args.name:
+            c.refresh_module(args.name)
+        else:
+            c.refresh_modules(enabled_only=not args.all)
+        print('modules refreshed')
 
 
 def list_path():
@@ -78,13 +88,40 @@ def cmd_doctor(args):
     Core().doctor()
 
 
+def _run(argv):
+    subprocess.run(argv, check=True)
+
+
+def _download_archive(dst):
+    _run(['curl', '-fL', '--connect-timeout', '20', '--max-time', '240', ARCHIVE_URL, '-o', str(dst)])
+
+
+def _install_from_archive():
+    with tempfile.TemporaryDirectory(prefix='routekit-update-') as d:
+        root = Path(d)
+        archive = root / 'routekit.tar.gz'
+        _download_archive(archive)
+        _run(['tar', '-xzf', str(archive), '-C', str(root)])
+        source = root / 'routekit-main'
+        _run(['python3', str(source / 'install.py'), '--source', str(source)])
+
+
+def _install_from_git(repo):
+    _run(['git', '-C', str(repo), 'pull', '--ff-only'])
+    _run(['python3', str(repo / 'install.py'), '--source', str(repo)])
+
+
 def cmd_self(args):
     if args.self_cmd == 'update':
         repo = Path('/opt/routekit')
-        if not (repo / '.git').exists():
-            raise SystemExit('self update needs git checkout at /opt/routekit')
-        subprocess.run(['git', '-C', str(repo), 'pull', '--ff-only'], check=True)
-        subprocess.run(['python3', str(repo / 'install.py'), '--source', str(repo)], check=True)
+        if (repo / '.git').exists():
+            _install_from_git(repo)
+        else:
+            _install_from_archive()
+        _run(['/usr/bin/rk', 'module', 'refresh'])
+        if not args.no_apply:
+            _run(['/usr/bin/rk', 'apply'])
+        print('routekit updated')
 
 
 def build_parser():
@@ -120,6 +157,10 @@ def build_parser():
     x = msub.add_parser('status')
     x.add_argument('name')
     x.set_defaults(func=cmd_module)
+    x = msub.add_parser('refresh')
+    x.add_argument('name', nargs='?')
+    x.add_argument('--all', action='store_true')
+    x.set_defaults(func=cmd_module)
 
     s = sub.add_parser('domain')
     dsub = s.add_subparsers(dest='domain_cmd', required=True)
@@ -138,6 +179,7 @@ def build_parser():
     s = sub.add_parser('self')
     ss = s.add_subparsers(dest='self_cmd', required=True)
     x = ss.add_parser('update')
+    x.add_argument('--no-apply', action='store_true')
     x.set_defaults(func=cmd_self)
 
     return p
