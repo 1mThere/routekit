@@ -1,5 +1,3 @@
-import json
-import re
 import shutil
 from pathlib import Path
 from subprocess import run, PIPE
@@ -107,13 +105,13 @@ def _ensure_dnsmasq_confdir(path):
 
 
 def _user_api(users_dir):
-    return '''#!/usr/bin/python3
+    template = r'''#!/usr/bin/python3
 import json
 import os
 import re
 from pathlib import Path
 
-USERS_DIR = Path(%r)
+USERS_DIR = Path(__USERS_DIR__)
 DEFAULT_MODE = 'direct'
 
 
@@ -164,7 +162,7 @@ def load_user(path, uid, ip, mac):
 
 
 def save_user(path, data):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\\n', encoding='utf-8')
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
 
 def main():
@@ -182,12 +180,13 @@ try:
     main()
 except Exception as e:
     respond({'ok': False, 'error': str(e)}, '500 Internal Server Error')
-''' % users_dir
+'''
+    return template.replace('__USERS_DIR__', repr(users_dir))
 
 
 def _index_html(tiles):
     body = '\n'.join(tiles) or '<section class="tile"><h2>Модули не подключены</h2></section>'
-    return '''<!doctype html>
+    template = '''<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
@@ -210,11 +209,12 @@ button{padding:11px 16px;border-radius:8px;border:1px solid #6f8cff;background:#
 </head>
 <body>
 <h1>RouteKit</h1>
-<main class="grid">%s</main>
+<main class="grid">__BODY__</main>
 <script>fetch('/cgi-bin/routekit-user',{cache:'no-store'}).catch(()=>{});</script>
 </body>
 </html>
-''' % body
+'''
+    return template.replace('__BODY__', body)
 
 
 def render(core, cfg):
