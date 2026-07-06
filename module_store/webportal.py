@@ -300,8 +300,6 @@ def _restore_uhttpd(cfg):
     _run(['uci', '-q', 'delete', 'uhttpd.main.listen_https'])
     _run(['uci', 'add_list', 'uhttpd.main.listen_http=0.0.0.0:80'])
     _run(['uci', 'add_list', 'uhttpd.main.listen_http=[::]:80'])
-    _run(['uci', 'add_list', 'uhttpd.main.listen_https=0.0.0.0:443'])
-    _run(['uci', 'add_list', 'uhttpd.main.listen_https=[::]:443'])
     _run(['uci', 'set', 'uhttpd.main.home=/www'])
     _run(['uci', 'set', 'uhttpd.main.cgi_prefix=/cgi-bin'])
     _run(['uci', 'set', 'uhttpd.main.redirect_https=0'])
@@ -323,10 +321,13 @@ def _bind_uhttpd(cfg):
     _run(['uci', 'set', 'uhttpd.routekit.cgi_prefix=/cgi-bin'])
     _run(['uci', 'set', 'uhttpd.routekit.redirect_https=0'])
 
+    _run(['uci', '-q', 'set', 'uhttpd.main=uhttpd'])
     _run(['uci', '-q', 'delete', 'uhttpd.main.listen_http'])
     _run(['uci', '-q', 'delete', 'uhttpd.main.listen_https'])
     _run(['uci', 'add_list', f'uhttpd.main.listen_http={lan_ip}:80'])
-    _run(['uci', 'add_list', f'uhttpd.main.listen_https={lan_ip}:443'])
+    _run(['uci', 'set', 'uhttpd.main.home=/www'])
+    _run(['uci', 'set', 'uhttpd.main.cgi_prefix=/cgi-bin'])
+    _run(['uci', 'set', 'uhttpd.main.redirect_https=0'])
 
     after = _out(['uci', 'show', 'uhttpd'])
     if before != after:
@@ -344,8 +345,9 @@ def apply(core, cfg):
     _runtime_add_ip(ip, prefixlen, lan_device)
     _write_hotplug(cfg)
     _cleanup_old_network()
-    if _bind_uhttpd(cfg):
-        _run(['/etc/init.d/uhttpd', 'restart'])
+    _bind_uhttpd(cfg)
+    _run(['/etc/init.d/uhttpd', 'enable'])
+    _run(['/etc/init.d/uhttpd', 'restart'])
 
 
 def cleanup(core, cfg):
