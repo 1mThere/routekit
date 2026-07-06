@@ -6,13 +6,12 @@ PRIORITY = 1000
 DEFAULTS = {
     'domain': 'v.be',
     'ip': '192.168.1.2',
+    'port': 8080,
     'prefixlen': 32,
     'home': '/www-routekit',
     'lan_device': 'br-lan',
-    'lan_ip': 'auto',
     'users_dir': '/etc/routekit/users',
     'hotplug': '/etc/hotplug.d/iface/90-routekit-webportal-ip',
-    'uhttpd_backup': '/etc/routekit/backups/uhttpd.before-webportal',
 }
 
 
@@ -72,15 +71,9 @@ def _ask(prompt, default):
 def enable(core, cfg):
     cfg['domain'] = _ask('portal domain', cfg.get('domain', 'v.be'))
     cfg['ip'] = _ask('portal ip', cfg.get('ip', '192.168.1.2'))
+    cfg['port'] = int(_ask('portal port', str(cfg.get('port', 8080))))
     cfg['home'] = cfg.get('home', '/www-routekit')
     cfg['users_dir'] = cfg.get('users_dir', '/etc/routekit/users')
-
-
-def _lan_ip(cfg):
-    if cfg.get('lan_ip') and cfg.get('lan_ip') != 'auto':
-        return cfg['lan_ip']
-    uci_ip = _out(['uci', '-q', 'get', 'network.lan.ipaddr'])
-    return uci_ip or '192.168.1.1'
 
 
 def _portal_prefixlen(cfg):
@@ -274,56 +267,23 @@ def _cleanup_old_network():
         _run(['uci', 'commit', 'network'])
 
 
-def _backup_uhttpd(cfg):
-    src = Path('/etc/config/uhttpd')
-    backup = Path(cfg.get('uhttpd_backup', '/etc/routekit/backups/uhttpd.before-webportal'))
-    if src.exists() and not backup.exists():
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, backup)
-
-
-def _restore_uhttpd(cfg):
-    backup = Path(cfg.get('uhttpd_backup', '/etc/routekit/backups/uhttpd.before-webportal'))
-    dst = Path('/etc/config/uhttpd')
-    if backup.exists():
-        shutil.copy2(backup, dst)
-        return
-    rom = Path('/rom/etc/config/uhttpd')
-    if rom.exists():
-        shutil.copy2(rom, dst)
-        return
+def _restore_uhttpd():
     _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
-    _run(['uci', '-q', 'set', 'uhttpd.main=uhttpd'])
-    _run(['uci', '-q', 'delete', 'uhttpd.main.listen_http'])
-    _run(['uci', '-q', 'delete', 'uhttpd.main.listen_https'])
-    _run(['uci', 'add_list', 'uhttpd.main.listen_http=0.0.0.0:80'])
-    _run(['uci', 'add_list', 'uhttpd.main.listen_http=[::]:80'])
-    _run(['uci', 'add_list', 'uhttpd.main.listen_https=0.0.0.0:443'])
-    _run(['uci', 'add_list', 'uhttpd.main.listen_https=[::]:443'])
-    _run(['uci', 'set', 'uhttpd.main.home=/www'])
-    _run(['uci', 'set', 'uhttpd.main.cgi_prefix=/cgi-bin'])
-    _run(['uci', 'set', 'uhttpd.main.redirect_https=0'])
     _run(['uci', 'commit', 'uhttpd'])
 
 
 def _bind_uhttpd(cfg):
     portal_ip = cfg['ip']
-    lan_ip = _lan_ip(cfg)
+    port = int(cfg.get('port', 8080))
     home = cfg['home']
     before = _out(['uci', 'show', 'uhttpd'])
 
-    _backup_uhttpd(cfg)
     _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
     _run(['uci', 'set', 'uhttpd.routekit=uhttpd'])
-    _run(['uci', 'add_list', f'uhttpd.routekit.listen_http={portal_ip}:80'])
+    _run(['uci', 'add_list', f'uhttpd.routekit.listen_http={portal_ip}:{port}'])
     _run(['uci', 'set', f'uhttpd.routekit.home={home}'])
     _run(['uci', 'set', 'uhttpd.routekit.cgi_prefix=/cgi-bin'])
     _run(['uci', 'set', 'uhttpd.routekit.redirect_https=0'])
-
-    _run(['uci', '-q', 'delete', 'uhttpd.main.listen_http'])
-    _run(['uci', '-q', 'delete', 'uhttpd.main.listen_https'])
-    _run(['uci', 'add_list', f'uhttpd.main.listen_http={lan_ip}:80'])
-    _run(['uci', 'add_list', f'uhttpd.main.listen_https={lan_ip}:443'])
 
     after = _out(['uci', 'show', 'uhttpd'])
     if before != after:
@@ -350,8 +310,7 @@ def cleanup(core, cfg):
     _remove(cfg.get('hotplug', '/etc/hotplug.d/iface/90-routekit-webportal-ip'))
     _remove(Path(cfg.get('home', '/www-routekit')))
     _remove(Path(core.config['dnsmasq_confdir']) / 'routekit-webportal.conf')
-    _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
-    _restore_uhttpd(cfg)
+    _restore_uhttpd()
     _run(['/etc/init.d/uhttpd', 'enable'])
     return ['dnsmasq', 'uhttpd']
 
@@ -362,8 +321,9 @@ def status(core, cfg):
     return {
         'domain': cfg.get('domain'),
         'ip': cfg.get('ip'),
+        'port': cfg.get('port', 8080),
         'prefixlen': _portal_prefixlen(cfg),
         'home': cfg.get('home'),
         'users': users,
-        'luci': _lan_ip(cfg),
+        'url': f'http://{cfg.get("domain")}:{cfg.get("port", 8080)}',
     }
