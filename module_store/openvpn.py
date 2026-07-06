@@ -31,19 +31,39 @@ def _run(argv):
 
 def _ask(prompt, default=''):
     suffix = f' [{default}]' if default else ''
-    return input(f'{prompt}{suffix}: ').strip() or default
+    return input(f'{prompt}{suffix}: ').strip().strip('"\'') or default
+
+
+def _normalize_source(src):
+    src = (src or '').strip().strip('"\'')
+    bad_prefixes = ('rk apply', 'rk enable openvpn')
+    for prefix in bad_prefixes:
+        if src.startswith(prefix):
+            src = src[len(prefix):].strip()
+    if src.startswith('apply/'):
+        src = src[5:]
+    if src.startswith('rk apply/'):
+        src = src[8:]
+    return src
 
 
 def enable(core, cfg):
-    src = _ask('OpenVPN config file path or URL', '')
+    src = _normalize_source(_ask('OpenVPN config file path or URL', ''))
     if src:
         dst = Path(cfg.get('config_path') or '/etc/openvpn/routekit_openvpn.ovpn')
         dst.parent.mkdir(parents=True, exist_ok=True)
         if src.startswith('http://') or src.startswith('https://'):
-            with urllib.request.urlopen(src, timeout=60) as r:
-                dst.write_bytes(r.read())
+            try:
+                with urllib.request.urlopen(src, timeout=60) as r:
+                    dst.write_bytes(r.read())
+            except Exception as e:
+                raise SystemExit(f'cannot download OpenVPN config: {e}')
         else:
-            shutil.copy2(src, dst)
+            source = Path(src)
+            if not source.exists():
+                raise SystemExit(f'OpenVPN config not found: {source}')
+            if source.resolve() != dst.resolve():
+                shutil.copy2(source, dst)
         cfg['config_path'] = str(dst)
 
     cfg['interface'] = _ask('OpenWrt network interface', cfg.get('interface', 'vpnclient'))
