@@ -163,7 +163,7 @@ def _tile_no_providers():
 def _tile(providers, items, ready):
     options = ''.join(f'<option value="{p}">{p}</option>' for p in providers)
     st_items = '\n'.join(items) if items else 'список пуст'
-    vpn_status = '' if ready else '<p class="status err">VPN ещё не готов. Трафик не перенаправляется.</p>'
+    vpn_status = '' if ready else '<p class="status err">VPN ещё не готов. Трафик может не пройти.</p>'
     return f'''<section class="tile" id="vpn-tile">
 <h2>VPN</h2>
 {vpn_status}
@@ -316,8 +316,7 @@ def render(core, cfg):
         return ['firewall', 'dnsmasq'] if changed else []
 
     default_provider = providers[0]
-    routing_ready = bool(ready)
-    _add_tile(core, _tile(providers, items, routing_ready))
+    _add_tile(core, _tile(providers, items, bool(ready)))
     _write(home / 'cgi-bin' / 'routekit-vpn', _api(cfg['users_dir'], default_provider, providers), 0o755)
 
     users = _users(cfg['users_dir'])
@@ -325,19 +324,15 @@ def render(core, cfg):
     fw4_dir = Path(core.config['fw4_post_dir'])
     changed = False
 
-    dns_domains = domains if routing_ready and _dnsmasq_supports_nftset() else []
+    dns_domains = domains if _dnsmasq_supports_nftset() else []
     dns_lines = [f'nftset=/{d}/4#inet#fw4#{cfg["dst_set"]}' for d in dns_domains]
     changed |= _write(dnsmasq_dir / 'routekit-vpn.conf', '\n'.join(dns_lines) + ('\n' if dns_lines else ''))
 
-    if routing_ready:
-        standard_ips = [u['ip'] for u in users if u.get('mode') == 'standard']
-        all_ips = [u['ip'] for u in users if u.get('mode') == 'vpn_all']
-    else:
-        standard_ips = []
-        all_ips = []
+    standard_ips = [u['ip'] for u in users if u.get('mode') == 'standard']
+    all_ips = [u['ip'] for u in users if u.get('mode') == 'vpn_all']
     lan = core.config.get('lan_iface', 'br-lan')
     nft = f'''table inet fw4 {{
-{_set_block(cfg['dst_set'], static_ips if routing_ready else [])}
+{_set_block(cfg['dst_set'], static_ips)}
 
 {_set_block(cfg['standard_src_set'], standard_ips)}
 
