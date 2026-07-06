@@ -157,9 +157,10 @@ def status(core, cfg):
     lan_zone = cfg.get('lan_zone', 'lan')
     wan_zone = cfg.get('wan_zone', 'wan')
     fwd = bool(_forwarding(lan_zone, wan_zone))
+    wan = _zone(wan_zone)
     return {
+        'client_internet': 'ready' if fwd else 'blocked',
+        'nat': 'enabled' if wan and _uci_get(f'firewall.{wan}.masq') == '1' else 'disabled',
         'lan_zone': lan_zone,
         'wan_zone': wan_zone,
-        'lan_to_wan': 'yes' if fwd else 'no',
-        'wan_masq': _uci_get(f'firewall.{_zone(wan_zone)}.masq') if _zone(wan_zone) else 'missing',
     }
