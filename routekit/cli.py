@@ -1,5 +1,4 @@
 import argparse
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -27,6 +26,13 @@ def cmd_disable(args):
     print(f'disabled: {args.name}')
 
 
+def _module_update(c, name=None, all_modules=False):
+    if name:
+        c.refresh_module(name)
+    else:
+        c.refresh_modules(enabled_only=not all_modules)
+
+
 def cmd_module(args):
     c = Core()
     if args.module_cmd == 'list':
@@ -46,12 +52,9 @@ def cmd_module(args):
         mod = c.load_module(args.name)
         for k, v in mod.status().items():
             print(f'{k}: {v}')
-    elif args.module_cmd == 'refresh':
-        if args.name:
-            c.refresh_module(args.name)
-        else:
-            c.refresh_modules(enabled_only=not args.all)
-        print('modules refreshed')
+    elif args.module_cmd in ('update', 'refresh'):
+        _module_update(c, getattr(args, 'name', None), getattr(args, 'all', False))
+        print('modules updated')
 
 
 def list_path():
@@ -111,17 +114,25 @@ def _install_from_git(repo):
     _run(['python3', str(repo / 'install.py'), '--source', str(repo)])
 
 
+def _do_update(no_apply=False):
+    repo = Path('/opt/routekit')
+    if (repo / '.git').exists():
+        _install_from_git(repo)
+    else:
+        _install_from_archive()
+    _run(['/usr/bin/rk', 'modules', 'update'])
+    if not no_apply:
+        _run(['/usr/bin/rk', 'apply'])
+    print('routekit updated')
+
+
+def cmd_update(args):
+    _do_update(no_apply=args.no_apply)
+
+
 def cmd_self(args):
     if args.self_cmd == 'update':
-        repo = Path('/opt/routekit')
-        if (repo / '.git').exists():
-            _install_from_git(repo)
-        else:
-            _install_from_archive()
-        _run(['/usr/bin/rk', 'module', 'refresh'])
-        if not args.no_apply:
-            _run(['/usr/bin/rk', 'apply'])
-        print('routekit updated')
+        _do_update(no_apply=args.no_apply)
 
 
 def build_parser():
@@ -137,6 +148,10 @@ def build_parser():
     s = sub.add_parser('doctor')
     s.set_defaults(func=cmd_doctor)
 
+    s = sub.add_parser('update')
+    s.add_argument('--no-apply', action='store_true')
+    s.set_defaults(func=cmd_update)
+
     s = sub.add_parser('enable')
     s.add_argument('name')
     s.set_defaults(func=cmd_enable)
@@ -145,22 +160,27 @@ def build_parser():
     s.add_argument('name')
     s.set_defaults(func=cmd_disable)
 
-    s = sub.add_parser('module')
-    msub = s.add_subparsers(dest='module_cmd', required=True)
-    x = msub.add_parser('list')
-    x.set_defaults(func=cmd_module)
-    x = msub.add_parser('set')
-    x.add_argument('name')
-    x.add_argument('key')
-    x.add_argument('value')
-    x.set_defaults(func=cmd_module)
-    x = msub.add_parser('status')
-    x.add_argument('name')
-    x.set_defaults(func=cmd_module)
-    x = msub.add_parser('refresh')
-    x.add_argument('name', nargs='?')
-    x.add_argument('--all', action='store_true')
-    x.set_defaults(func=cmd_module)
+    for module_cmd_name in ('module', 'modules'):
+        s = sub.add_parser(module_cmd_name)
+        msub = s.add_subparsers(dest='module_cmd', required=True)
+        x = msub.add_parser('list')
+        x.set_defaults(func=cmd_module)
+        x = msub.add_parser('set')
+        x.add_argument('name')
+        x.add_argument('key')
+        x.add_argument('value')
+        x.set_defaults(func=cmd_module)
+        x = msub.add_parser('status')
+        x.add_argument('name')
+        x.set_defaults(func=cmd_module)
+        x = msub.add_parser('update')
+        x.add_argument('name', nargs='?')
+        x.add_argument('--all', action='store_true')
+        x.set_defaults(func=cmd_module)
+        x = msub.add_parser('refresh')
+        x.add_argument('name', nargs='?')
+        x.add_argument('--all', action='store_true')
+        x.set_defaults(func=cmd_module)
 
     s = sub.add_parser('domain')
     dsub = s.add_subparsers(dest='domain_cmd', required=True)
