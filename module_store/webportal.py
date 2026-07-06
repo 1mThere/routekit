@@ -61,8 +61,7 @@ def _ensure_dnsmasq_confdir(path):
 
 
 def _cgi_script(users_dir):
-    template = """#!/usr/bin/env python3
-import html
+    template = r'''#!/usr/bin/python3
 import json
 import os
 import re
@@ -73,6 +72,14 @@ from pathlib import Path
 USERS_DIR = Path(__USERS_DIR__)
 DEFAULT_MODE = 'direct'
 MODES = {'direct', 'standard', 'vpn_all'}
+
+
+def respond(data, status='200 OK'):
+    print('Status: ' + status)
+    print('Content-Type: application/json; charset=utf-8')
+    print('Cache-Control: no-store')
+    print()
+    print(json.dumps(data, ensure_ascii=False))
 
 
 def mac_for_ip(ip):
@@ -103,7 +110,7 @@ def load_user(path, uid, ip, mac):
     data = {}
     if path.exists():
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding='utf-8'))
         except Exception:
             data = {}
     data.setdefault('id', uid)
@@ -116,7 +123,18 @@ def load_user(path, uid, ip, mac):
 
 
 def save_user(path, data):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+
+def read_post():
+    try:
+        length = int(os.environ.get('CONTENT_LENGTH') or '0')
+    except ValueError:
+        length = 0
+    if length <= 0:
+        return {}
+    body = os.read(0, length).decode(errors='ignore')
+    return urllib.parse.parse_qs(body)
 
 
 def apply_async():
@@ -132,87 +150,125 @@ def apply_async():
         pass
 
 
-def read_post():
-    try:
-        length = int(os.environ.get('CONTENT_LENGTH') or '0')
-    except ValueError:
-        length = 0
-    if length <= 0:
-        return {}
-    body = os.read(0, length).decode(errors='ignore')
-    return urllib.parse.parse_qs(body)
-
-
-def checked(current, value):
-    return 'checked' if current == value else ''
-
-
-ip = os.environ.get('REMOTE_ADDR', '')
-mac = mac_for_ip(ip)
-uid = safe_id(ip, mac)
-path = user_file(uid)
-user = load_user(path, uid, ip, mac)
-
-if not path.exists():
-    save_user(path, user)
-
-if os.environ.get('REQUEST_METHOD') == 'POST':
-    form = read_post()
-    mode = (form.get('mode') or [''])[0]
-    if mode in MODES:
-        user['mode'] = mode
+def main():
+    ip = os.environ.get('REMOTE_ADDR', '')
+    mac = mac_for_ip(ip)
+    uid = safe_id(ip, mac)
+    path = user_file(uid)
+    user = load_user(path, uid, ip, mac)
+    created = not path.exists()
+    if created:
         save_user(path, user)
-        apply_async()
-    print('Status: 303 See Other')
-    print('Location: /cgi-bin/routekit?saved=1')
-    print()
-    raise SystemExit
 
-saved = 'saved=1' in os.environ.get('QUERY_STRING', '')
-mode = user.get('mode', DEFAULT_MODE)
+    saved = False
+    if os.environ.get('REQUEST_METHOD') == 'POST':
+        form = read_post()
+        mode = (form.get('mode') or [''])[0]
+        if mode in MODES:
+            user['mode'] = mode
+            save_user(path, user)
+            saved = True
+            apply_async()
 
-print('Content-Type: text/html; charset=utf-8')
-print('Cache-Control: no-store')
-print()
-print(f'''<!doctype html>
+    respond({
+        'ok': True,
+        'id': uid,
+        'ip': ip,
+        'mac': mac,
+        'mode': user.get('mode', DEFAULT_MODE),
+        'config': str(path),
+        'created': created,
+        'saved': saved,
+    })
+
+
+try:
+    main()
+except Exception as e:
+    respond({'ok': False, 'error': str(e)}, '500 Internal Server Error')
+'''
+    return template.replace('__USERS_DIR__', repr(users_dir))
+
+
+def _index_html():
+    return r'''<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RouteKit</title>
 <style>
-html{{background:#0b0d10;color:#e7eaf0;font-family:Arial,sans-serif}}
-body{{max-width:760px;margin:40px auto;padding:0 18px;font-size:16px}}
-.card{{background:#11151b;border:1px solid #2a303a;border-radius:12px;padding:18px 20px;margin:14px 0}}
-h1{{margin:0 0 14px}}
-code{{background:#080b0f;border:1px solid #303744;border-radius:6px;padding:2px 7px}}
-label{{display:block;padding:13px 0;border-top:1px solid #252b34}}
-label:first-of-type{{border-top:0}}
-button{{padding:11px 16px;border-radius:8px;border:1px solid #6f8cff;background:#496ee8;color:white;font-size:16px}}
-.ok{{background:#102216;border:1px solid #2d7a43;color:#d9ffe3;padding:10px 12px;border-radius:8px}}
-.muted{{color:#9aa4b2}}
+html{background:#0b0d10;color:#e7eaf0;font-family:Arial,sans-serif}
+body{max-width:760px;margin:40px auto;padding:0 18px;font-size:16px}
+.card{background:#11151b;border:1px solid #2a303a;border-radius:12px;padding:18px 20px;margin:14px 0}
+h1{margin:0 0 14px}
+code{background:#080b0f;border:1px solid #303744;border-radius:6px;padding:2px 7px}
+label{display:block;padding:13px 0;border-top:1px solid #252b34}
+label:first-of-type{border-top:0}
+button{padding:11px 16px;border-radius:8px;border:1px solid #6f8cff;background:#496ee8;color:white;font-size:16px}
+.ok{background:#102216;border:1px solid #2d7a43;color:#d9ffe3;padding:10px 12px;border-radius:8px}
+.err{background:#2b1111;border:1px solid #8d3434;color:#ffdada;padding:10px 12px;border-radius:8px}
+.muted{color:#9aa4b2}
 </style>
 </head>
 <body>
 <h1>RouteKit</h1>
-{'<div class="ok">Сохранено</div>' if saved else ''}
-<section class="card">
-<p>IP: <code>{html.escape(ip)}</code></p>
-<p>MAC: <code>{html.escape(mac or '-')}</code></p>
-<p>Конфиг: <code>{html.escape(str(path))}</code></p>
+<div id="msg" class="card">Загрузка...</div>
+<section class="card" id="info" hidden>
+<p>IP: <code id="ip"></code></p>
+<p>MAC: <code id="mac"></code></p>
+<p>Конфиг: <code id="config"></code></p>
 </section>
-<form method="post" class="card">
+<form id="form" class="card" hidden>
 <h2>Режим маршрутизации</h2>
-<label><input type="radio" name="mode" value="direct" {checked(mode, 'direct')}> напрямую</label>
-<label><input type="radio" name="mode" value="standard" {checked(mode, 'standard')}> список через VPN</label>
-<label><input type="radio" name="mode" value="vpn_all" {checked(mode, 'vpn_all')}> всё через VPN</label>
+<label><input type="radio" name="mode" value="direct"> напрямую</label>
+<label><input type="radio" name="mode" value="standard"> список через VPN</label>
+<label><input type="radio" name="mode" value="vpn_all"> всё через VPN</label>
 <button type="submit">Сохранить</button>
 <p class="muted">Для каждого клиента создаётся отдельный конфиг. По умолчанию используется режим напрямую.</p>
 </form>
+<script>
+const api = '/cgi-bin/routekit-api';
+const msg = document.getElementById('msg');
+const info = document.getElementById('info');
+const form = document.getElementById('form');
+function text(id, value){ document.getElementById(id).textContent = value || '-'; }
+function setMsg(value, cls){ msg.textContent = value; msg.className = cls || 'card'; }
+function show(data){
+  if(!data.ok){ setMsg(data.error || 'Ошибка', 'err'); return; }
+  text('ip', data.ip);
+  text('mac', data.mac);
+  text('config', data.config);
+  const input = form.querySelector('input[value="' + data.mode + '"]');
+  if(input) input.checked = true;
+  info.hidden = false;
+  form.hidden = false;
+  setMsg(data.saved ? 'Сохранено' : 'Готово', data.saved ? 'ok' : 'card');
+}
+async function load(){
+  try{
+    const res = await fetch(api, {cache:'no-store'});
+    show(await res.json());
+  }catch(e){
+    setMsg('API не ответил: ' + e, 'err');
+  }
+}
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  setMsg('Сохранение...', 'card');
+  try{
+    const body = new URLSearchParams(new FormData(form));
+    const res = await fetch(api, {method:'POST', body});
+    show(await res.json());
+  }catch(err){
+    setMsg('Не сохранилось: ' + err, 'err');
+  }
+});
+load();
+</script>
 </body>
-</html>''')
-"""
-    return template.replace('__USERS_DIR__', repr(users_dir))
+</html>
+'''
 
 
 def render(core, cfg):
@@ -227,13 +283,8 @@ def render(core, cfg):
     home = Path(cfg['home'])
     cgi = home / 'cgi-bin'
     cgi.mkdir(parents=True, exist_ok=True)
-    _write(home / 'index.html', '''<!doctype html>
-<meta charset="utf-8">
-<meta http-equiv="refresh" content="0; url=/cgi-bin/routekit">
-<title>RouteKit</title>
-<a href="/cgi-bin/routekit">RouteKit</a>
-''')
-    _write(cgi / 'routekit', _cgi_script(str(users_dir)), 0o755)
+    _write(home / 'index.html', _index_html())
+    _write(cgi / 'routekit-api', _cgi_script(str(users_dir)), 0o755)
     return ['dnsmasq']
 
 
