@@ -9,6 +9,14 @@ from .system import service_restart
 
 
 STAGES = ('preflight', 'render', 'apply')
+SERVICE_ORDER = ('network', 'firewall', 'dnsmasq', 'uhttpd')
+
+
+def _service_key(name):
+    try:
+        return SERVICE_ORDER.index(name), name
+    except ValueError:
+        return len(SERVICE_ORDER), name
 
 
 class LoadedModule:
@@ -220,7 +228,7 @@ class Core:
                 print(f'cleaned: {mod.name}')
             except Exception as e:
                 print(f'cleanup failed: {mod.name}: {e}')
-        for svc in sorted(services):
+        for svc in sorted(services, key=_service_key):
             service_restart(svc)
 
     def cleanup_module(self, name):
@@ -271,7 +279,7 @@ class Core:
         services = set()
         for mod in mods:
             services.update(mod.call('render'))
-        for svc in sorted(services):
+        for svc in sorted(services, key=_service_key):
             service_restart(svc)
         for mod in mods:
             mod.call('apply')
