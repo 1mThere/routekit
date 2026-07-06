@@ -21,7 +21,7 @@ rk init
 rk update
 ```
 
-Update only downloaded enabled modules:
+Update downloaded enabled modules:
 
 ```sh
 rk modules update
@@ -47,16 +47,21 @@ Dependency order:
 webportal -> vpn -> provider modules
 ```
 
-`webportal` creates the local portal, serves the base page, and lets enabled modules insert their own tiles.
+`webportal` creates the local portal and lets enabled modules insert their own tiles.
 
-`vpn` inserts a VPN tile into the portal. It creates a per-client config under `/etc/routekit/users/` and renders routing rules from those configs.
+`vpn` inserts a VPN tile only when the VPN module is enabled. It does not ask for a protocol during `rk enable vpn`. It detects enabled provider modules, for example `openvpn`. If no provider module is enabled, the portal tile says that providers were not found.
 
-Provider modules such as `openvpn`, `wireguard`, `vless`, `xray`, or `sing-box` are responsible for preparing their own tunnel/runtime resources. RouteKit then wraps their output through the apply lifecycle.
+Provider modules such as `openvpn`, `wireguard`, `vless`, `xray`, or `sing-box` prepare their own tunnel/runtime resources.
 
-## Domain list
+## VPN standard list
+
+The standard list accepts domains, subdomains through their parent domain, IPv4 addresses, and IPv4 CIDR ranges.
 
 ```sh
-rk domain add youtube.com googlevideo.com ytimg.com x.com twitter.com twimg.com
+rk vpn stlist add youtube.com googlevideo.com 1.1.1.1 8.8.8.0/24
+rk vpn stlist list
+rk vpn stlist del youtube.com
+rk vpn stlist replace example.com 9.9.9.9
 rk apply
 ```
 
