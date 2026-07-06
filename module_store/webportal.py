@@ -1,7 +1,7 @@
 from pathlib import Path
 from subprocess import run, PIPE
 
-PRIORITY = 10
+PRIORITY = 1000
 DEFAULTS = {
     'domain': 'v.be',
     'ip': '192.168.1.2',
@@ -30,9 +30,24 @@ def _out(argv):
 def _write(path, data, mode=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(data, encoding='utf-8')
+    old = None
+    if path.exists():
+        try:
+            old = path.read_text(encoding='utf-8')
+        except Exception:
+            old = None
+    changed = old != data
+    if changed:
+        path.write_text(data, encoding='utf-8')
     if mode is not None:
-        path.chmod(mode)
+        try:
+            old_mode = path.stat().st_mode & 0o777
+        except Exception:
+            old_mode = None
+        if old_mode != mode:
+            path.chmod(mode)
+            changed = True
+    return changed
 
 
 def _ask(prompt, default):
@@ -55,23 +70,23 @@ def _lan_ip(cfg):
 
 
 def _ensure_dnsmasq_confdir(path):
-    _run(['uci', '-q', 'del_list', f'dhcp.@dnsmasq[0].confdir={path}'])
+    current = _out(['uci', '-q', 'get', 'dhcp.@dnsmasq[0].confdir'])
+    if path in current.splitlines():
+        return False
     _run(['uci', 'add_list', f'dhcp.@dnsmasq[0].confdir={path}'])
     _run(['uci', 'commit', 'dhcp'])
+    return True
 
 
-def _cgi_script(users_dir):
+def _user_api(users_dir):
     template = r'''#!/usr/bin/python3
 import json
 import os
 import re
-import subprocess
-import urllib.parse
 from pathlib import Path
 
 USERS_DIR = Path(__USERS_DIR__)
 DEFAULT_MODE = 'direct'
-MODES = {'direct', 'standard', 'vpn_all'}
 
 
 def respond(data, status='200 OK'):
@@ -117,37 +132,11 @@ def load_user(path, uid, ip, mac):
     data['ip'] = ip
     data['mac'] = mac
     data.setdefault('mode', DEFAULT_MODE)
-    if data.get('mode') not in MODES:
-        data['mode'] = DEFAULT_MODE
     return data
 
 
 def save_user(path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-
-
-def read_post():
-    try:
-        length = int(os.environ.get('CONTENT_LENGTH') or '0')
-    except ValueError:
-        length = 0
-    if length <= 0:
-        return {}
-    body = os.read(0, length).decode(errors='ignore')
-    return urllib.parse.parse_qs(body)
-
-
-def apply_async():
-    try:
-        subprocess.Popen(
-            ['/usr/bin/rk', 'apply'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except Exception:
-        pass
 
 
 def main():
@@ -156,30 +145,9 @@ def main():
     uid = safe_id(ip, mac)
     path = user_file(uid)
     user = load_user(path, uid, ip, mac)
-    created = not path.exists()
-    if created:
+    if not path.exists():
         save_user(path, user)
-
-    saved = False
-    if os.environ.get('REQUEST_METHOD') == 'POST':
-        form = read_post()
-        mode = (form.get('mode') or [''])[0]
-        if mode in MODES:
-            user['mode'] = mode
-            save_user(path, user)
-            saved = True
-            apply_async()
-
-    respond({
-        'ok': True,
-        'id': uid,
-        'ip': ip,
-        'mac': mac,
-        'mode': user.get('mode', DEFAULT_MODE),
-        'config': str(path),
-        'created': created,
-        'saved': saved,
-    })
+    respond({'ok': True, 'id': uid})
 
 
 try:
@@ -190,8 +158,11 @@ except Exception as e:
     return template.replace('__USERS_DIR__', repr(users_dir))
 
 
-def _index_html():
-    return r'''<!doctype html>
+def _index_html(tiles):
+    body = '\n'.join(tiles)
+    if not body:
+        body = '<section class="tile"><h2>Модули не подключены</h2></section>'
+    return '''<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
@@ -199,93 +170,47 @@ def _index_html():
 <title>RouteKit</title>
 <style>
 html{background:#0b0d10;color:#e7eaf0;font-family:Arial,sans-serif}
-body{max-width:760px;margin:40px auto;padding:0 18px;font-size:16px}
-.card{background:#11151b;border:1px solid #2a303a;border-radius:12px;padding:18px 20px;margin:14px 0}
-h1{margin:0 0 14px}
-code{background:#080b0f;border:1px solid #303744;border-radius:6px;padding:2px 7px}
-label{display:block;padding:13px 0;border-top:1px solid #252b34}
-label:first-of-type{border-top:0}
+body{max-width:960px;margin:38px auto;padding:0 18px;font-size:16px}
+h1{margin:0 0 18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+.tile{background:#11151b;border:1px solid #2a303a;border-radius:12px;padding:18px 20px}
+.tile h2{margin:0 0 14px}
+label{display:block;margin:12px 0}
+select{width:100%;box-sizing:border-box;margin-top:6px;padding:10px;border-radius:8px;background:#080b0f;color:#e7eaf0;border:1px solid #303744}
 button{padding:11px 16px;border-radius:8px;border:1px solid #6f8cff;background:#496ee8;color:white;font-size:16px}
-.ok{background:#102216;border:1px solid #2d7a43;color:#d9ffe3;padding:10px 12px;border-radius:8px}
-.err{background:#2b1111;border:1px solid #8d3434;color:#ffdada;padding:10px 12px;border-radius:8px}
-.muted{color:#9aa4b2}
+.status{min-height:22px;color:#9aa4b2}
+.ok{color:#d9ffe3}
+.err{color:#ffdada}
 </style>
 </head>
 <body>
 <h1>RouteKit</h1>
-<div id="msg" class="card">Загрузка...</div>
-<section class="card" id="info" hidden>
-<p>IP: <code id="ip"></code></p>
-<p>MAC: <code id="mac"></code></p>
-<p>Конфиг: <code id="config"></code></p>
-</section>
-<form id="form" class="card" hidden>
-<h2>Режим маршрутизации</h2>
-<label><input type="radio" name="mode" value="direct"> напрямую</label>
-<label><input type="radio" name="mode" value="standard"> список через VPN</label>
-<label><input type="radio" name="mode" value="vpn_all"> всё через VPN</label>
-<button type="submit">Сохранить</button>
-<p class="muted">Для каждого клиента создаётся отдельный конфиг. По умолчанию используется режим напрямую.</p>
-</form>
-<script>
-const api = '/cgi-bin/routekit-api';
-const msg = document.getElementById('msg');
-const info = document.getElementById('info');
-const form = document.getElementById('form');
-function text(id, value){ document.getElementById(id).textContent = value || '-'; }
-function setMsg(value, cls){ msg.textContent = value; msg.className = cls || 'card'; }
-function show(data){
-  if(!data.ok){ setMsg(data.error || 'Ошибка', 'err'); return; }
-  text('ip', data.ip);
-  text('mac', data.mac);
-  text('config', data.config);
-  const input = form.querySelector('input[value="' + data.mode + '"]');
-  if(input) input.checked = true;
-  info.hidden = false;
-  form.hidden = false;
-  setMsg(data.saved ? 'Сохранено' : 'Готово', data.saved ? 'ok' : 'card');
-}
-async function load(){
-  try{
-    const res = await fetch(api, {cache:'no-store'});
-    show(await res.json());
-  }catch(e){
-    setMsg('API не ответил: ' + e, 'err');
-  }
-}
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  setMsg('Сохранение...', 'card');
-  try{
-    const body = new URLSearchParams(new FormData(form));
-    const res = await fetch(api, {method:'POST', body});
-    show(await res.json());
-  }catch(err){
-    setMsg('Не сохранилось: ' + err, 'err');
-  }
-});
-load();
-</script>
+<main class="grid">
+__TILES__
+</main>
+<script>fetch('/cgi-bin/routekit-user',{cache:'no-store'}).catch(()=>{});</script>
 </body>
 </html>
-'''
+'''.replace('__TILES__', body)
 
 
 def render(core, cfg):
     users_dir = Path(cfg.get('users_dir', '/etc/routekit/users'))
     users_dir.mkdir(parents=True, exist_ok=True)
 
+    changed = False
     dnsmasq_dir = Path(core.config['dnsmasq_confdir'])
     dnsmasq_dir.mkdir(parents=True, exist_ok=True)
-    _ensure_dnsmasq_confdir(str(dnsmasq_dir))
-    _write(dnsmasq_dir / 'routekit-webportal.conf', f'address=/{cfg["domain"]}/{cfg["ip"]}\n')
+    changed |= _ensure_dnsmasq_confdir(str(dnsmasq_dir))
+    changed |= _write(dnsmasq_dir / 'routekit-webportal.conf', f'address=/{cfg["domain"]}/{cfg["ip"]}\n')
 
     home = Path(cfg['home'])
     cgi = home / 'cgi-bin'
     cgi.mkdir(parents=True, exist_ok=True)
-    _write(home / 'index.html', _index_html())
-    _write(cgi / 'routekit-api', _cgi_script(str(users_dir)), 0o755)
-    return ['dnsmasq']
+    tiles = list(getattr(core, 'portal_tiles', []))
+    _write(home / 'index.html', _index_html(tiles))
+    _write(cgi / 'routekit-user', _user_api(str(users_dir)), 0o755)
+    return ['dnsmasq'] if changed else []
 
 
 def _runtime_add_ip(ip, prefixlen, dev):
@@ -310,10 +235,17 @@ exit 0
 ''', 0o755)
 
 
+def _cleanup_old_network():
+    if _out(['uci', '-q', 'show', 'network.routekit_portal']):
+        _run(['uci', '-q', 'delete', 'network.routekit_portal'])
+        _run(['uci', 'commit', 'network'])
+
+
 def _bind_uhttpd(cfg):
     portal_ip = cfg['ip']
     lan_ip = _lan_ip(cfg)
     home = cfg['home']
+    before = _out(['uci', 'show', 'uhttpd'])
 
     _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
     _run(['uci', 'set', 'uhttpd.routekit=uhttpd'])
@@ -327,7 +259,11 @@ def _bind_uhttpd(cfg):
     _run(['uci', 'add_list', f'uhttpd.main.listen_http={lan_ip}:80'])
     _run(['uci', 'add_list', f'uhttpd.main.listen_https={lan_ip}:443'])
 
-    _run(['uci', 'commit', 'uhttpd'])
+    after = _out(['uci', 'show', 'uhttpd'])
+    if before != after:
+        _run(['uci', 'commit', 'uhttpd'])
+        return True
+    return False
 
 
 def apply(core, cfg):
@@ -337,8 +273,9 @@ def apply(core, cfg):
 
     _runtime_add_ip(ip, prefixlen, lan_device)
     _write_hotplug(cfg)
-    _bind_uhttpd(cfg)
-    _run(['/etc/init.d/uhttpd', 'restart'])
+    _cleanup_old_network()
+    if _bind_uhttpd(cfg):
+        _run(['/etc/init.d/uhttpd', 'restart'])
 
 
 def status(core, cfg):
@@ -348,7 +285,6 @@ def status(core, cfg):
         'domain': cfg.get('domain'),
         'ip': cfg.get('ip'),
         'home': cfg.get('home'),
-        'users_dir': str(users_dir),
         'users': users,
         'luci': _lan_ip(cfg),
     }
