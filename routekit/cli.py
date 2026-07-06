@@ -2,9 +2,9 @@ import argparse
 import subprocess
 from pathlib import Path
 
-from .core import Core, MODULES
-from .domains import normalize_many, read_list, write_list
 from .config import CONFIG_PATH
+from .core import Core
+from .domains import normalize_many, read_list, write_list
 
 
 def cmd_init(args):
@@ -13,25 +13,33 @@ def cmd_init(args):
     print(f'initialized: {CONFIG_PATH}')
 
 
+def cmd_enable(args):
+    Core().enable_module(args.name)
+    print(f'enabled: {args.name}')
+
+
+def cmd_disable(args):
+    Core().disable_module(args.name)
+    print(f'disabled: {args.name}')
+
+
 def cmd_module(args):
     c = Core()
     if args.module_cmd == 'list':
-        for mod in c.modules():
-            cfg = mod.cfg()
-            print(f'{mod.name}\t{"enabled" if cfg.get("enabled") else "disabled"}')
-    elif args.module_cmd == 'enable':
-        c.enable_module(args.name)
-        print(f'enabled: {args.name}')
-    elif args.module_cmd == 'disable':
-        c.disable_module(args.name)
-        print(f'disabled: {args.name}')
+        enabled = set(c.enabled_names())
+        for name, reg in sorted(c.registry().items()):
+            status = 'enabled' if name in enabled else 'disabled'
+            impl = 'ok' if reg.get('implemented', True) else 'not-implemented'
+            deps = ','.join(reg.get('deps', [])) or '-'
+            downloaded = 'downloaded' if c.module_path(name).exists() else 'not-downloaded'
+            print(f'{name}\t{status}\t{impl}\tdeps={deps}\t{downloaded}')
     elif args.module_cmd == 'set':
         c.set_module_value(args.name, args.key, args.value)
         print(f'set: {args.name}.{args.key}={args.value}')
     elif args.module_cmd == 'status':
-        if args.name not in MODULES:
-            raise SystemExit(f'unknown module: {args.name}')
-        mod = MODULES[args.name](c)
+        if args.name not in c.enabled_names():
+            raise SystemExit(f'module is not enabled: {args.name}')
+        mod = c.load_module(args.name)
         for k, v in mod.status().items():
             print(f'{k}: {v}')
 
@@ -92,15 +100,17 @@ def build_parser():
     s = sub.add_parser('doctor')
     s.set_defaults(func=cmd_doctor)
 
+    s = sub.add_parser('enable')
+    s.add_argument('name')
+    s.set_defaults(func=cmd_enable)
+
+    s = sub.add_parser('disable')
+    s.add_argument('name')
+    s.set_defaults(func=cmd_disable)
+
     s = sub.add_parser('module')
     msub = s.add_subparsers(dest='module_cmd', required=True)
     x = msub.add_parser('list')
-    x.set_defaults(func=cmd_module)
-    x = msub.add_parser('enable')
-    x.add_argument('name')
-    x.set_defaults(func=cmd_module)
-    x = msub.add_parser('disable')
-    x.add_argument('name')
     x.set_defaults(func=cmd_module)
     x = msub.add_parser('set')
     x.add_argument('name')
