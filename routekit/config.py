@@ -14,6 +14,12 @@ DEFAULT_CONFIG = {
     'enabled_modules': [],
     'modules': {},
     'registry': {
+        'gateway': {
+            'url': f'{BASE_URL}/gateway.py',
+            'deps': [],
+            'implemented': True,
+            'auto_enable': True,
+        },
         'webportal': {
             'url': f'{BASE_URL}/webportal.py',
             'deps': [],
@@ -21,7 +27,7 @@ DEFAULT_CONFIG = {
         },
         'vpn': {
             'url': f'{BASE_URL}/vpn.py',
-            'deps': ['webportal'],
+            'deps': ['webportal', 'gateway'],
             'implemented': True,
         },
         'openvpn': {
@@ -45,6 +51,10 @@ def _merge_defaults(cfg):
     merged.setdefault('modules', {})
     registry = DEFAULT_CONFIG['registry'].copy()
     registry.update(merged.get('registry', {}))
+    for name, default in DEFAULT_CONFIG['registry'].items():
+        current = registry.setdefault(name, {})
+        for k, v in default.items():
+            current.setdefault(k, v)
     merged['registry'] = registry
     return merged
 
