@@ -4,6 +4,7 @@ from pathlib import Path
 PRIORITY = 20
 DEFAULTS = {
     'provider': 'openvpn',
+    'providers': ['openvpn', 'wireguard', 'vless'],
     'list_path': '/etc/routekit/lists/standard.txt',
     'users_dir': '/etc/routekit/users',
     'dst_set': 'rk_vpn_dst4',
@@ -15,10 +16,22 @@ DEFAULTS = {
 }
 
 
-def _write(path, data):
+def _write(path, data, mode=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(data, encoding='utf-8')
+    old = path.read_text(encoding='utf-8') if path.exists() else None
+    changed = old != data
+    if changed:
+        path.write_text(data, encoding='utf-8')
+    if mode is not None:
+        try:
+            old_mode = path.stat().st_mode & 0o777
+        except Exception:
+            old_mode = None
+        if old_mode != mode:
+            path.chmod(mode)
+            changed = True
+    return changed
 
 
 def _domains(path):
@@ -62,24 +75,124 @@ def _set_block(name, ips=None):
         }}'''
 
 
+def _add_tile(core, html):
+    if not hasattr(core, 'portal_tiles'):
+        core.portal_tiles = []
+    core.portal_tiles.append(html)
+
+
+def _tile(providers):
+    options = ''.join(f'<option value="{p}">{p}</option>' for p in providers)
+    return f'''<section class="tile" id="vpn-tile">
+<h2>VPN</h2>
+<form id="vpn-form" method="post" action="/cgi-bin/routekit-vpn">
+<label>Режим
+<select name="mode">
+<option value="direct">напрямую</option>
+<option value="standard">список через VPN</option>
+<option value="vpn_all">всё через VPN</option>
+</select>
+</label>
+<label>Протокол
+<select name="provider">
+{options}
+</select>
+</label>
+<button type="submit">Сохранить</button>
+</form>
+</section>'''
+
+
+def _api(users_dir, default_provider, providers):
+    providers_json = json.dumps(providers)
+    return f'''#!/usr/bin/python3
+import json
+import os
+import re
+import urllib.parse
+from pathlib import Path
+
+USERS_DIR = Path({users_dir!r})
+PROVIDERS = {providers_json}
+MODES = {{'direct', 'standard', 'vpn_all'}}
+
+
+def respond(data):
+    print('Content-Type: application/json; charset=utf-8')
+    print()
+    print(json.dumps(data, ensure_ascii=False))
+
+
+def mac_for_ip(ip):
+    try:
+        for line in Path('/proc/net/arp').read_text().splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 4 and parts[0] == ip:
+                return parts[3].lower()
+    except Exception:
+        return ''
+    return ''
+
+
+def uid_for(ip, mac):
+    raw = mac.replace(':', '_') if mac else ip
+    return re.sub(r'[^a-zA-Z0-9_]+', '_', raw)
+
+
+def read_post():
+    length = int(os.environ.get('CONTENT_LENGTH') or '0')
+    body = os.read(0, length).decode(errors='ignore') if length else ''
+    return urllib.parse.parse_qs(body)
+
+
+ip = os.environ.get('REMOTE_ADDR', '')
+mac = mac_for_ip(ip)
+uid = uid_for(ip, mac)
+USERS_DIR.mkdir(parents=True, exist_ok=True)
+path = USERS_DIR / (uid + '.json')
+try:
+    data = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {{}}
+except Exception:
+    data = {{}}
+data.setdefault('id', uid)
+data['ip'] = ip
+data['mac'] = mac
+data.setdefault('mode', 'direct')
+data.setdefault('provider', {default_provider!r})
+if os.environ.get('REQUEST_METHOD') == 'POST':
+    form = read_post()
+    mode = (form.get('mode') or [''])[0]
+    provider = (form.get('provider') or [''])[0]
+    if mode in MODES:
+        data['mode'] = mode
+    if provider in PROVIDERS:
+        data['provider'] = provider
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+respond({{'ok': True, 'mode': data['mode'], 'provider': data['provider']}})
+'''
+
+
 def enable(core, cfg):
-    print('vpn module uses per-user configs created by webportal.')
-    print('default mode is direct; users choose direct, standard, or vpn_all in the portal.')
+    print('vpn module adds a VPN tile to the web portal.')
     cfg['provider'] = input(f'provider [{cfg.get("provider", "openvpn")}]: ').strip() or cfg.get('provider', 'openvpn')
 
 
 def render(core, cfg):
+    providers = cfg.get('providers') or ['openvpn', 'wireguard', 'vless']
+    _add_tile(core, _tile(providers))
+    _write(Path('/www-routekit/cgi-bin/routekit-vpn'), _api(cfg['users_dir'], cfg.get('provider', providers[0]), providers), 0o755)
+
     domains = _domains(cfg['list_path'])
     users = _users(cfg['users_dir'])
     dnsmasq_dir = Path(core.config['dnsmasq_confdir'])
     fw4_dir = Path(core.config['fw4_post_dir'])
+    changed = False
 
     dns_lines = [f'nftset=/{d}/4#inet#fw4#{cfg["dst_set"]}' for d in domains]
-    _write(dnsmasq_dir / 'routekit-vpn.conf', '\n'.join(dns_lines) + ('\n' if dns_lines else ''))
+    changed |= _write(dnsmasq_dir / 'routekit-vpn.conf', '\n'.join(dns_lines) + ('\n' if dns_lines else ''))
 
     standard_ips = [u['ip'] for u in users if u.get('mode') == 'standard']
     all_ips = [u['ip'] for u in users if u.get('mode') == 'vpn_all']
-
     lan = core.config.get('lan_iface', 'br-lan')
     nft = f'''table inet fw4 {{
 {_set_block(cfg['dst_set'])}
@@ -91,13 +204,13 @@ def render(core, cfg):
         chain {cfg['chain_name']} {{
                 type filter hook prerouting priority -155; policy accept;
                 meta mark & {cfg['mark_mask']} != 0 return
-                iifname "{lan}" ip saddr @{cfg['all_src_set']} meta mark set meta mark & 0xff00ffff | {cfg['mark']} comment "routekit user vpn_all"
-                iifname "{lan}" ip saddr @{cfg['standard_src_set']} ip daddr @{cfg['dst_set']} meta mark set meta mark & 0xff00ffff | {cfg['mark']} comment "routekit user standard"
+                iifname "{lan}" ip saddr @{cfg['all_src_set']} meta mark set meta mark & 0xff00ffff | {cfg['mark']}
+                iifname "{lan}" ip saddr @{cfg['standard_src_set']} ip daddr @{cfg['dst_set']} meta mark set meta mark & 0xff00ffff | {cfg['mark']}
         }}
 }}
 '''
-    _write(fw4_dir / '40-routekit-vpn.nft', nft)
-    return ['firewall', 'dnsmasq']
+    changed |= _write(fw4_dir / '40-routekit-vpn.nft', nft)
+    return ['firewall', 'dnsmasq'] if changed else []
 
 
 def status(core, cfg):
@@ -106,7 +219,4 @@ def status(core, cfg):
         'provider': cfg.get('provider'),
         'domains': len(_domains(cfg['list_path'])),
         'users': len(users),
-        'direct': sum(1 for u in users if u.get('mode') == 'direct'),
-        'standard': sum(1 for u in users if u.get('mode') == 'standard'),
-        'vpn_all': sum(1 for u in users if u.get('mode') == 'vpn_all'),
     }
