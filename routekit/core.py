@@ -71,24 +71,11 @@ class Core:
         return MODULE_DIR / f'{name}.py'
 
     def _download_with_curl(self, url, tmp):
-        return subprocess.run(
-            [
-                'curl',
-                '-fsSL',
-                '--retry', '3',
-                '--retry-delay', '1',
-                '--retry-all-errors',
-                '--connect-timeout', '8',
-                '--max-time', '45',
-                '--speed-time', '10',
-                '--speed-limit', '512',
-                url,
-                '-o', str(tmp),
-            ],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        return subprocess.run([
+            'curl', '-fsSL', '--retry', '3', '--retry-delay', '1', '--retry-all-errors',
+            '--connect-timeout', '8', '--max-time', '45', '--speed-time', '10', '--speed-limit', '512',
+            url, '-o', str(tmp),
+        ], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def _download_with_urllib(self, url):
         req = urllib.request.Request(url, headers={'User-Agent': 'routekit'})
@@ -159,12 +146,31 @@ class Core:
             if reg.get('implemented', True):
                 self.refresh_module(name)
 
-    def load_module(self, name):
-        path = self.ensure_module_downloaded(name)
+    def _load_module_file(self, name, path):
         spec = importlib.util.spec_from_file_location(f'routekit_runtime_{name}', path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         return LoadedModule(name, mod, self)
+
+    def load_module(self, name):
+        return self._load_module_file(name, self.ensure_module_downloaded(name))
+
+    def load_local_module(self, name):
+        path = self.module_path(name)
+        if not path.exists():
+            raise SystemExit(f'module is not downloaded: {name}')
+        return self._load_module_file(name, path)
+
+    def local_modules(self):
+        loaded = []
+        if not MODULE_DIR.exists():
+            return []
+        for path in sorted(MODULE_DIR.glob('*.py')):
+            try:
+                loaded.append(self._load_module_file(path.stem, path))
+            except Exception as e:
+                print(f'skip module {path.stem}: {e}')
+        return sorted(loaded, key=lambda m: m.priority)
 
     def modules(self, only_enabled=False):
         if only_enabled:
@@ -202,7 +208,32 @@ class Core:
         self.save()
         self.apply()
 
+    def _cleanup_loaded(self, mods):
+        services = set()
+        for mod in sorted(mods, key=lambda m: m.priority, reverse=True):
+            fn = getattr(mod.py, 'cleanup', None)
+            if not fn:
+                continue
+            try:
+                result = fn(self, mod.cfg()) or []
+                services.update(result)
+                print(f'cleaned: {mod.name}')
+            except Exception as e:
+                print(f'cleanup failed: {mod.name}: {e}')
+        for svc in sorted(services):
+            service_restart(svc)
+
+    def cleanup_module(self, name):
+        self._cleanup_loaded([self.load_local_module(name)])
+
+    def rescue(self):
+        self._cleanup_loaded(self.local_modules())
+        self.config['enabled_modules'] = []
+        self.save()
+
     def disable_module(self, name):
+        if self.module_path(name).exists():
+            self.cleanup_module(name)
         enabled = self.enabled_names()
         if name in enabled:
             enabled.remove(name)
