@@ -1,3 +1,5 @@
+import json
+import re
 import shutil
 from pathlib import Path
 from subprocess import run, PIPE
@@ -78,15 +80,21 @@ def enable(core, cfg):
     cfg['users_dir'] = cfg.get('users_dir', '/etc/routekit/users')
 
 
+def _plain_ip(value, fallback='192.168.1.1'):
+    value = str(value or '').strip()
+    if not value:
+        return fallback
+    return value.split('/', 1)[0]
+
+
 def _lan_ip(cfg):
     if cfg.get('lan_ip') and cfg.get('lan_ip') != 'auto':
-        return cfg['lan_ip']
-    uci_ip = _out(['uci', '-q', 'get', 'network.lan.ipaddr'])
-    return uci_ip or '192.168.1.1'
+        return _plain_ip(cfg['lan_ip'])
+    return _plain_ip(_out(['uci', '-q', 'get', 'network.lan.ipaddr']))
 
 
-def _portal_prefixlen(cfg):
-    return 32
+def _portal_ip(cfg):
+    return _plain_ip(cfg.get('ip', '192.168.1.2'), '192.168.1.2')
 
 
 def _ensure_dnsmasq_confdir(path):
@@ -99,13 +107,13 @@ def _ensure_dnsmasq_confdir(path):
 
 
 def _user_api(users_dir):
-    template = r'''#!/usr/bin/python3
+    return '''#!/usr/bin/python3
 import json
 import os
 import re
 from pathlib import Path
 
-USERS_DIR = Path(__USERS_DIR__)
+USERS_DIR = Path(%r)
 DEFAULT_MODE = 'direct'
 
 
@@ -156,7 +164,7 @@ def load_user(path, uid, ip, mac):
 
 
 def save_user(path, data):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\\n', encoding='utf-8')
 
 
 def main():
@@ -174,14 +182,11 @@ try:
     main()
 except Exception as e:
     respond({'ok': False, 'error': str(e)}, '500 Internal Server Error')
-'''
-    return template.replace('__USERS_DIR__', repr(users_dir))
+''' % users_dir
 
 
 def _index_html(tiles):
-    body = '\n'.join(tiles)
-    if not body:
-        body = '<section class="tile"><h2>Модули не подключены</h2></section>'
+    body = '\n'.join(tiles) or '<section class="tile"><h2>Модули не подключены</h2></section>'
     return '''<!doctype html>
 <html lang="ru">
 <head>
@@ -205,35 +210,31 @@ button{padding:11px 16px;border-radius:8px;border:1px solid #6f8cff;background:#
 </head>
 <body>
 <h1>RouteKit</h1>
-<main class="grid">
-__TILES__
-</main>
+<main class="grid">%s</main>
 <script>fetch('/cgi-bin/routekit-user',{cache:'no-store'}).catch(()=>{});</script>
 </body>
 </html>
-'''.replace('__TILES__', body)
+''' % body
 
 
 def render(core, cfg):
+    cfg['ip'] = _portal_ip(cfg)
+    cfg['port'] = 80
     users_dir = Path(cfg.get('users_dir', '/etc/routekit/users'))
     users_dir.mkdir(parents=True, exist_ok=True)
-
-    changed = False
     dnsmasq_dir = Path(core.config['dnsmasq_confdir'])
     dnsmasq_dir.mkdir(parents=True, exist_ok=True)
-    changed |= _ensure_dnsmasq_confdir(str(dnsmasq_dir))
+    changed = _ensure_dnsmasq_confdir(str(dnsmasq_dir))
     changed |= _write(dnsmasq_dir / 'routekit-webportal.conf', f'address=/{cfg["domain"]}/{cfg["ip"]}\n')
-
     home = Path(cfg['home'])
     cgi = home / 'cgi-bin'
     cgi.mkdir(parents=True, exist_ok=True)
-    tiles = list(getattr(core, 'portal_tiles', []))
-    _write(home / 'index.html', _index_html(tiles))
+    _write(home / 'index.html', _index_html(list(getattr(core, 'portal_tiles', []))))
     _write(cgi / 'routekit-user', _user_api(str(users_dir)), 0o755)
     return ['dnsmasq'] if changed else []
 
 
-def _runtime_cleanup_ip(ip, keep_prefixlen, dev):
+def _runtime_cleanup_ip(ip, dev):
     current = _run(['ip', '-o', '-4', 'addr', 'show', 'dev', dev], capture=True)
     if current.returncode != 0:
         return
@@ -242,20 +243,13 @@ def _runtime_cleanup_ip(ip, keep_prefixlen, dev):
         if 'inet' not in parts:
             continue
         addr = parts[parts.index('inet') + 1]
-        host = addr.split('/', 1)[0]
-        if host == ip:
+        if addr.split('/', 1)[0] == ip:
             _run(['ip', 'addr', 'del', addr, 'dev', dev])
 
 
-def _runtime_add_ip(ip, prefixlen, dev):
-    addr = f'{ip}/{prefixlen}'
-    _run(['ip', 'addr', 'replace', addr, 'dev', dev])
-
-
 def _write_hotplug(cfg):
-    ip = cfg['ip']
+    ip = _portal_ip(cfg)
     dev = cfg.get('lan_device', 'br-lan')
-    prefixlen = _portal_prefixlen(cfg)
     path = cfg.get('hotplug', '/etc/hotplug.d/iface/90-routekit-webportal-ip')
     _write(path, f'''#!/bin/sh
 [ "$ACTION" = "ifup" ] || [ "$ACTION" = "ifupdate" ] || exit 0
@@ -265,15 +259,9 @@ for addr in $(ip -o -4 addr show dev "{dev}" | awk '{{print $4}}'); do
   [ "$host" = "{ip}" ] || continue
   ip addr del "$addr" dev "{dev}" 2>/dev/null
 done
-ip addr replace "{ip}/{prefixlen}" dev "{dev}" 2>/dev/null
+ip addr replace "{ip}/32" dev "{dev}" 2>/dev/null
 exit 0
 ''', 0o755)
-
-
-def _cleanup_old_network():
-    if _out(['uci', '-q', 'show', 'network.routekit_portal']):
-        _run(['uci', '-q', 'delete', 'network.routekit_portal'])
-        _run(['uci', 'commit', 'network'])
 
 
 def _backup_uhttpd(cfg):
@@ -299,7 +287,6 @@ def _restore_uhttpd(cfg):
     _run(['uci', '-q', 'delete', 'uhttpd.main.listen_http'])
     _run(['uci', '-q', 'delete', 'uhttpd.main.listen_https'])
     _run(['uci', 'add_list', 'uhttpd.main.listen_http=0.0.0.0:80'])
-    _run(['uci', 'add_list', 'uhttpd.main.listen_http=[::]:80'])
     _run(['uci', 'set', 'uhttpd.main.home=/www'])
     _run(['uci', 'set', 'uhttpd.main.cgi_prefix=/cgi-bin'])
     _run(['uci', 'set', 'uhttpd.main.redirect_https=0'])
@@ -307,20 +294,16 @@ def _restore_uhttpd(cfg):
 
 
 def _bind_uhttpd(cfg):
-    portal_ip = cfg['ip']
+    portal_ip = _portal_ip(cfg)
     lan_ip = _lan_ip(cfg)
-    port = int(cfg.get('port', 80))
     home = cfg['home']
-    before = _out(['uci', 'show', 'uhttpd'])
-
     _backup_uhttpd(cfg)
     _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
     _run(['uci', 'set', 'uhttpd.routekit=uhttpd'])
-    _run(['uci', 'add_list', f'uhttpd.routekit.listen_http={portal_ip}:{port}'])
+    _run(['uci', 'add_list', f'uhttpd.routekit.listen_http={portal_ip}:80'])
     _run(['uci', 'set', f'uhttpd.routekit.home={home}'])
     _run(['uci', 'set', 'uhttpd.routekit.cgi_prefix=/cgi-bin'])
     _run(['uci', 'set', 'uhttpd.routekit.redirect_https=0'])
-
     _run(['uci', '-q', 'set', 'uhttpd.main=uhttpd'])
     _run(['uci', '-q', 'delete', 'uhttpd.main.listen_http'])
     _run(['uci', '-q', 'delete', 'uhttpd.main.listen_https'])
@@ -328,30 +311,23 @@ def _bind_uhttpd(cfg):
     _run(['uci', 'set', 'uhttpd.main.home=/www'])
     _run(['uci', 'set', 'uhttpd.main.cgi_prefix=/cgi-bin'])
     _run(['uci', 'set', 'uhttpd.main.redirect_https=0'])
-
-    after = _out(['uci', 'show', 'uhttpd'])
-    if before != after:
-        _run(['uci', 'commit', 'uhttpd'])
-        return True
-    return False
+    _run(['uci', 'commit', 'uhttpd'])
 
 
 def apply(core, cfg):
-    ip = cfg['ip']
-    lan_device = cfg.get('lan_device', 'br-lan')
-    prefixlen = _portal_prefixlen(cfg)
-
-    _runtime_cleanup_ip(ip, prefixlen, lan_device)
-    _runtime_add_ip(ip, prefixlen, lan_device)
+    cfg['port'] = 80
+    cfg['ip'] = _portal_ip(cfg)
+    dev = cfg.get('lan_device', 'br-lan')
+    _runtime_cleanup_ip(cfg['ip'], dev)
+    _run(['ip', 'addr', 'replace', f'{cfg["ip"]}/32', 'dev', dev])
     _write_hotplug(cfg)
-    _cleanup_old_network()
     _bind_uhttpd(cfg)
     _run(['/etc/init.d/uhttpd', 'enable'])
     _run(['/etc/init.d/uhttpd', 'restart'])
 
 
 def cleanup(core, cfg):
-    _runtime_cleanup_ip(cfg.get('ip', '192.168.1.2'), 32, cfg.get('lan_device', 'br-lan'))
+    _runtime_cleanup_ip(_portal_ip(cfg), cfg.get('lan_device', 'br-lan'))
     _remove(cfg.get('hotplug', '/etc/hotplug.d/iface/90-routekit-webportal-ip'))
     _remove(Path(cfg.get('home', '/www-routekit')))
     _remove(Path(core.config['dnsmasq_confdir']) / 'routekit-webportal.conf')
@@ -366,9 +342,9 @@ def status(core, cfg):
     users = len(list(users_dir.glob('*.json'))) if users_dir.exists() else 0
     return {
         'domain': cfg.get('domain'),
-        'ip': cfg.get('ip'),
-        'port': cfg.get('port', 80),
-        'prefixlen': _portal_prefixlen(cfg),
+        'ip': _portal_ip(cfg),
+        'port': 80,
+        'prefixlen': 32,
         'home': cfg.get('home'),
         'users': users,
         'url': f'http://{cfg.get("domain")}',
