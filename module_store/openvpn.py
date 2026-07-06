@@ -1,3 +1,4 @@
+import ipaddress
 import shutil
 import time
 import urllib.request
@@ -191,6 +192,40 @@ def _sync_network_iface(iface, dev):
     return changed
 
 
+def _peer_gateway(dev):
+    for line in _out(['ip', '-4', 'addr', 'show', 'dev', dev]).splitlines():
+        parts = line.split()
+        if 'inet' not in parts:
+            continue
+        if 'peer' in parts:
+            peer = parts[parts.index('peer') + 1].split('/', 1)[0]
+            return peer
+        cidr = parts[parts.index('inet') + 1]
+        try:
+            iface = ipaddress.ip_interface(cidr)
+        except Exception:
+            continue
+        net = iface.network
+        if net.num_addresses <= 2:
+            continue
+        gw = net.network_address + 1
+        if gw == iface.ip and net.num_addresses > 3:
+            gw = net.network_address + 2
+        return str(gw)
+    return ''
+
+
+def _replace_vpn_default_route(table_name, dev):
+    _run(['ip', 'route', 'flush', 'table', table_name])
+    gw = _peer_gateway(dev)
+    if gw:
+        p = _run(['ip', 'route', 'replace', 'default', 'via', gw, 'dev', dev, 'table', table_name])
+        if p.returncode == 0:
+            return gw
+    _run(['ip', 'route', 'replace', 'default', 'dev', dev, 'table', table_name])
+    return ''
+
+
 def enable(core, cfg):
     src = _normalize_source(_ask('OpenVPN config file path or URL', ''))
     if src:
@@ -258,8 +293,10 @@ def apply(core, cfg):
     needle = f'fwmark {mark}/{mask} lookup {table_name}'
     if needle not in rules:
         _run(['ip', 'rule', 'add', 'fwmark', f'{mark}/{mask}', 'table', table_name, 'priority', prio])
-    _run(['ip', 'route', 'replace', 'default', 'dev', dev, 'table', table_name])
+    gateway = _replace_vpn_default_route(table_name, dev)
     _cleanup_main_tunnel_routes()
+    if gateway:
+        print(f'openvpn: gateway {gateway}')
 
 
 def is_ready(core, cfg):
@@ -270,6 +307,7 @@ def status(core, cfg):
     return {
         'interface': cfg.get('interface'),
         'device': _ready_dev(cfg) or 'not-ready',
+        'gateway': _peer_gateway(_ready_dev(cfg)) if _ready_dev(cfg) else '-',
         'expected_device': _expected_dev(cfg) or '-',
         'config': cfg.get('config_path'),
         'table': cfg.get('table_name'),
