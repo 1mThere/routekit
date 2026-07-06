@@ -215,17 +215,20 @@ def _tile(providers, items, ready):
 </section>'''
 
 
-def _api(users_dir, default_provider, providers):
+def _api(users_dir, default_provider, providers, standard_set, all_set):
     providers_json = json.dumps(providers)
     return f'''#!/usr/bin/python3
 import json
 import os
 import re
+import subprocess
 import urllib.parse
 from pathlib import Path
 
 USERS_DIR = Path({users_dir!r})
 PROVIDERS = {providers_json}
+STANDARD_SET = {standard_set!r}
+ALL_SET = {all_set!r}
 MODES = {{'direct', 'standard', 'vpn_all'}}
 
 
@@ -257,6 +260,22 @@ def read_post():
     return urllib.parse.parse_qs(body)
 
 
+def nft(args):
+    return subprocess.run(['nft'] + args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
+
+
+def sync_nft(ip, mode):
+    if not ip:
+        return False
+    nft(['delete', 'element', 'inet', 'fw4', STANDARD_SET, '{{', ip, '}}'])
+    nft(['delete', 'element', 'inet', 'fw4', ALL_SET, '{{', ip, '}}'])
+    if mode == 'standard':
+        return nft(['add', 'element', 'inet', 'fw4', STANDARD_SET, '{{', ip, '}}'])
+    if mode == 'vpn_all':
+        return nft(['add', 'element', 'inet', 'fw4', ALL_SET, '{{', ip, '}}'])
+    return True
+
+
 ip = os.environ.get('REMOTE_ADDR', '')
 mac = mac_for_ip(ip)
 uid = uid_for(ip, mac)
@@ -272,6 +291,7 @@ data['mac'] = mac
 data.setdefault('mode', 'direct')
 data.setdefault('provider', {default_provider!r})
 saved = False
+live = False
 if os.environ.get('REQUEST_METHOD') == 'POST':
     form = read_post()
     mode = (form.get('mode') or [''])[0]
@@ -284,7 +304,9 @@ if os.environ.get('REQUEST_METHOD') == 'POST':
 if data.get('provider') not in PROVIDERS:
     data['provider'] = {default_provider!r}
 path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + chr(10), encoding='utf-8')
-respond({{'ok': True, 'mode': data['mode'], 'provider': data['provider'], 'saved': saved}})
+if saved:
+    live = sync_nft(data.get('ip'), data.get('mode'))
+respond({{'ok': True, 'mode': data['mode'], 'provider': data['provider'], 'saved': saved, 'live': live}})
 '''
 
 
@@ -317,7 +339,7 @@ def render(core, cfg):
 
     default_provider = providers[0]
     _add_tile(core, _tile(providers, items, bool(ready)))
-    _write(home / 'cgi-bin' / 'routekit-vpn', _api(cfg['users_dir'], default_provider, providers), 0o755)
+    _write(home / 'cgi-bin' / 'routekit-vpn', _api(cfg['users_dir'], default_provider, providers, cfg['standard_src_set'], cfg['all_src_set']), 0o755)
 
     users = _users(cfg['users_dir'])
     dnsmasq_dir = Path(core.config['dnsmasq_confdir'])
