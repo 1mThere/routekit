@@ -1,4 +1,3 @@
-import json
 import shutil
 import time
 import urllib.request
@@ -10,6 +9,7 @@ PRIORITY = 30
 DEFAULTS = {
     'interface': 'vpnclient',
     'config_path': '/etc/openvpn/routekit_openvpn.ovpn',
+    'runtime_config_path': '/etc/openvpn/routekit_openvpn.runtime.ovpn',
     'device': 'auto',
     'table_id': 1001,
     'table_name': 'rk_openvpn',
@@ -49,6 +49,10 @@ def _normalize_source(src):
     return src
 
 
+def _is_tunnel(dev):
+    return dev.startswith('tun') or dev.startswith('tap') or dev.startswith('ovpn') or dev.startswith('wg')
+
+
 def _dev_exists(dev):
     if not dev:
         return False
@@ -59,7 +63,7 @@ def _first_tunnel_dev():
     links = _out(['ip', '-o', 'link', 'show']).splitlines()
     for line in links:
         name = line.split(':', 2)[1].strip().split('@', 1)[0]
-        if name.startswith('tun') or name.startswith('tap') or name.startswith('ovpn') or name.startswith('wg'):
+        if _is_tunnel(name):
             return name
     return ''
 
@@ -108,6 +112,85 @@ def _wait_ready_dev(cfg):
     return ''
 
 
+def _clean_config(src, dst):
+    src = Path(src)
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    skip = {'redirect-gateway', 'route', 'route-ipv6', 'route-nopull'}
+    lines = []
+    for raw in src.read_text(encoding='utf-8', errors='ignore').splitlines():
+        stripped = raw.strip()
+        token = stripped.split(None, 1)[0] if stripped else ''
+        if token in skip:
+            continue
+        lines.append(raw)
+    lines.append('route-nopull')
+    data = '\n'.join(lines).rstrip() + '\n'
+    old = dst.read_text(encoding='utf-8', errors='ignore') if dst.exists() else None
+    if old != data:
+        dst.write_text(data, encoding='utf-8')
+    return str(dst)
+
+
+def _route_dev(line):
+    parts = line.split()
+    if 'dev' not in parts:
+        return ''
+    i = parts.index('dev')
+    if i + 1 >= len(parts):
+        return ''
+    return parts[i + 1]
+
+
+def _cleanup_main_tunnel_routes():
+    for line in _out(['ip', 'route', 'show']).splitlines():
+        target = line.split(None, 1)[0] if line else ''
+        if target not in ('default', '0.0.0.0/1', '128.0.0.0/1'):
+            continue
+        dev = _route_dev(line)
+        if not _is_tunnel(dev):
+            continue
+        _run(['ip', 'route', 'del'] + line.split())
+
+
+def _ensure_rt_table(table_id, table_name):
+    rt = Path('/etc/iproute2/rt_tables')
+    current = rt.read_text(encoding='utf-8', errors='ignore') if rt.exists() else ''
+    if f'{table_id} {table_name}' not in current:
+        with rt.open('a', encoding='utf-8') as f:
+            f.write(f'{table_id} {table_name}\n')
+
+
+def _ensure_wan_network(iface):
+    lines = _out(['uci', '-q', 'show', 'firewall']).splitlines()
+    zones = []
+    for line in lines:
+        left, _, right = line.partition('=')
+        if right == 'zone' and left.startswith('firewall.@'):
+            zones.append(left[len('firewall.'):])
+    for zone in zones:
+        if _out(['uci', '-q', 'get', f'firewall.{zone}.name']) != 'wan':
+            continue
+        networks = _out(['uci', '-q', 'get', f'firewall.{zone}.network']).split()
+        if iface not in networks:
+            _run(['uci', 'add_list', f'firewall.{zone}.network={iface}'])
+            _run(['uci', 'commit', 'firewall'])
+        return
+
+
+def _sync_network_iface(iface, dev):
+    old = _out(['uci', '-q', 'get', f'network.{iface}.device'])
+    changed = old != dev or _out(['uci', '-q', 'get', f'network.{iface}.proto']) != 'none'
+    _run(['uci', '-q', 'delete', f'network.{iface}'])
+    _run(['uci', 'set', f'network.{iface}=interface'])
+    _run(['uci', 'set', f'network.{iface}.proto=none'])
+    _run(['uci', 'set', f'network.{iface}.device={dev}'])
+    _run(['uci', 'commit', 'network'])
+    _run(['ifdown', iface])
+    _run(['ifup', iface])
+    return changed
+
+
 def enable(core, cfg):
     src = _normalize_source(_ask('OpenVPN config file path or URL', ''))
     if src:
@@ -137,13 +220,17 @@ def render(core, cfg):
 
 def apply(core, cfg):
     config_path = cfg.get('config_path')
+    runtime_config_path = cfg.get('runtime_config_path') or '/etc/openvpn/routekit_openvpn.runtime.ovpn'
     iface = cfg.get('interface', 'vpnclient')
 
+    _cleanup_main_tunnel_routes()
+
     if config_path and Path(config_path).exists():
+        active_config = _clean_config(config_path, runtime_config_path)
         _run(['uci', '-q', 'delete', 'openvpn.routekit_openvpn'])
         _run(['uci', 'set', 'openvpn.routekit_openvpn=openvpn'])
         _run(['uci', 'set', 'openvpn.routekit_openvpn.enabled=1'])
-        _run(['uci', 'set', f'openvpn.routekit_openvpn.config={config_path}'])
+        _run(['uci', 'set', f'openvpn.routekit_openvpn.config={active_config}'])
         _run(['uci', 'commit', 'openvpn'])
         _run(['/etc/init.d/openvpn', 'enable'])
         _run(['/etc/init.d/openvpn', 'restart'])
@@ -154,11 +241,7 @@ def apply(core, cfg):
     mask = str(cfg['mark_mask'])
     prio = str(cfg['priority'])
 
-    rt = Path('/etc/iproute2/rt_tables')
-    current = rt.read_text(encoding='utf-8', errors='ignore') if rt.exists() else ''
-    if f'{table_id} {table_name}' not in current:
-        with rt.open('a', encoding='utf-8') as f:
-            f.write(f'{table_id} {table_name}\n')
+    _ensure_rt_table(table_id, table_name)
 
     dev = _wait_ready_dev(cfg)
     if not dev:
@@ -167,17 +250,20 @@ def apply(core, cfg):
         print('openvpn: check logread -e openvpn')
         return
 
-    _run(['uci', '-q', 'delete', f'network.{iface}'])
-    _run(['uci', 'set', f'network.{iface}=interface'])
-    _run(['uci', 'set', f'network.{iface}.proto=none'])
-    _run(['uci', 'set', f'network.{iface}.device={dev}'])
-    _run(['uci', 'commit', 'network'])
+    _sync_network_iface(iface, dev)
+    _ensure_wan_network(iface)
+    _run(['/etc/init.d/firewall', 'restart'])
 
     rules = _out(['ip', 'rule', 'show'])
     needle = f'fwmark {mark}/{mask} lookup {table_name}'
     if needle not in rules:
         _run(['ip', 'rule', 'add', 'fwmark', f'{mark}/{mask}', 'table', table_name, 'priority', prio])
     _run(['ip', 'route', 'replace', 'default', 'dev', dev, 'table', table_name])
+    _cleanup_main_tunnel_routes()
+
+
+def is_ready(core, cfg):
+    return bool(_ready_dev(cfg))
 
 
 def status(core, cfg):
