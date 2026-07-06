@@ -1,4 +1,6 @@
 import importlib.util
+import subprocess
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -68,6 +70,34 @@ class Core:
     def module_path(self, name):
         return MODULE_DIR / f'{name}.py'
 
+    def download_module(self, name, url, path):
+        tmp = path.with_suffix('.tmp')
+        errors = []
+
+        try:
+            with urllib.request.urlopen(url, timeout=90) as r:
+                data = r.read().decode('utf-8')
+            tmp.write_text(data, encoding='utf-8')
+            tmp.replace(path)
+            return
+        except Exception as e:
+            errors.append(f'python urllib: {e}')
+
+        curl = subprocess.run(
+            ['curl', '-fL', '--connect-timeout', '20', '--max-time', '180', url, '-o', str(tmp)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if curl.returncode == 0:
+            tmp.replace(path)
+            return
+
+        errors.append(f'curl: {curl.stderr.strip()}')
+        if tmp.exists():
+            tmp.unlink()
+        raise SystemExit('cannot download module ' + name + '\n' + '\n'.join(errors))
+
     def ensure_module_downloaded(self, name):
         reg = self.registry().get(name)
         if not reg:
@@ -85,9 +115,7 @@ class Core:
 
         MODULE_DIR.mkdir(parents=True, exist_ok=True)
         print(f'downloading module {name}: {url}')
-        with urllib.request.urlopen(url, timeout=30) as r:
-            data = r.read().decode('utf-8')
-        path.write_text(data, encoding='utf-8')
+        self.download_module(name, url, path)
         return path
 
     def load_module(self, name):
