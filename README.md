@@ -2,17 +2,7 @@
 
 RouteKit is a Python orchestrator for OpenWrt.
 
-Core is intentionally small:
-
-- no per-device policies;
-- no per-user settings;
-- no built-in web portal;
-- no built-in OpenVPN logic;
-- no built-in zapret logic;
-- default traffic is direct;
-- every feature is a module.
-
-The core only installs `rk`, stores config, downloads enabled modules, and runs the apply lifecycle.
+The core is intentionally small. It installs `rk`, stores config, downloads enabled modules, and runs the apply lifecycle. Features live in modules.
 
 ## Install on OpenWrt
 
@@ -25,9 +15,25 @@ python3 /tmp/routekit-main/install.py
 rk init
 ```
 
-After this only the core is installed.
+## Update
 
-## Enable modules
+```sh
+rk update
+```
+
+Update only downloaded enabled modules:
+
+```sh
+rk modules update
+```
+
+Update one module:
+
+```sh
+rk modules update webportal
+```
+
+## Modules
 
 ```sh
 rk enable webportal
@@ -38,20 +44,16 @@ rk enable openvpn
 Dependency order:
 
 ```text
-webportal -> vpn -> openvpn
+webportal -> vpn -> provider modules
 ```
 
-`rk enable webportal` asks for a domain. Default: `v.be`.
+`webportal` creates the local portal, serves the base page, and lets enabled modules insert their own tiles.
 
-`rk enable vpn` refuses to run before `webportal`.
+`vpn` inserts a VPN tile into the portal. It creates a per-client config under `/etc/routekit/users/` and renders routing rules from those configs.
 
-`rk enable openvpn` refuses to run before `vpn`, then asks for an OpenVPN config file path or URL. It is a module, not core behavior.
+Provider modules such as `openvpn`, `wireguard`, `vless`, `xray`, or `sing-box` are responsible for preparing their own tunnel/runtime resources. RouteKit then wraps their output through the apply lifecycle.
 
-`rk enable zapret` is intentionally not implemented yet.
-
-## Global domain VPN
-
-There are no device profiles. The VPN module applies globally to LAN traffic matching the domain list.
+## Domain list
 
 ```sh
 rk domain add youtube.com googlevideo.com ytimg.com x.com twitter.com twimg.com
@@ -63,17 +65,11 @@ rk apply
 On `rk apply` the core calls enabled modules in stages:
 
 ```text
-preflight -> render -> service restart -> apply -> status
+preflight -> render -> service reload/restart -> apply
 ```
 
-Modules can prepare other software first. The wrapper is applied after modules render their parts.
+Modules can prepare software first. RouteKit applies generated DNS, firewall, portal, and routing wrappers after modules render their parts.
 
-## Update
+## License
 
-If installed from `/opt/routekit` git checkout:
-
-```sh
-rk self update
-```
-
-If installed from tarball, download the new archive and run `install.py` again. Existing `/etc/routekit/config.json` is preserved.
+MIT
