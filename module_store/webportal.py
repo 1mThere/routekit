@@ -8,6 +8,7 @@ DEFAULTS = {
     'prefixlen': 24,
     'home': '/www-routekit',
     'lan_device': 'br-lan',
+    'hotplug': '/etc/hotplug.d/iface/90-routekit-webportal-ip',
 }
 
 
@@ -17,10 +18,12 @@ def _run(argv, check=False, capture=False):
     return run(argv, check=check)
 
 
-def _write(path, data):
+def _write(path, data, mode=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(data, encoding='utf-8')
+    if mode is not None:
+        path.chmod(mode)
 
 
 def _ask(prompt, default):
@@ -67,21 +70,28 @@ def _runtime_add_ip(ip, prefixlen, dev):
     _run(['ip', 'addr', 'add', addr, 'dev', dev])
 
 
+def _write_hotplug(cfg):
+    ip = cfg['ip']
+    dev = cfg.get('lan_device', 'br-lan')
+    prefixlen = int(cfg.get('prefixlen', 24))
+    path = cfg.get('hotplug', '/etc/hotplug.d/iface/90-routekit-webportal-ip')
+    _write(path, f'''#!/bin/sh
+[ "$ACTION" = "ifup" ] || [ "$ACTION" = "ifupdate" ] || exit 0
+[ "$DEVICE" = "{dev}" ] || [ "$INTERFACE" = "lan" ] || exit 0
+ip -4 addr show dev "{dev}" | grep -q "{ip}/{prefixlen}" && exit 0
+ip addr add "{ip}/{prefixlen}" dev "{dev}" 2>/dev/null
+exit 0
+''', 0o755)
+
+
 def apply(core, cfg):
     ip = cfg['ip']
     home = cfg['home']
     lan_device = cfg.get('lan_device', 'br-lan')
     prefixlen = int(cfg.get('prefixlen', 24))
 
-    _run(['uci', '-q', 'delete', 'network.routekit_portal'])
-    _run(['uci', 'set', 'network.routekit_portal=interface'])
-    _run(['uci', 'set', 'network.routekit_portal.proto=static'])
-    _run(['uci', 'set', f'network.routekit_portal.device={lan_device}'])
-    _run(['uci', 'set', f'network.routekit_portal.ipaddr={ip}'])
-    _run(['uci', 'set', 'network.routekit_portal.netmask=255.255.255.0'])
-    _run(['uci', 'commit', 'network'])
-
     _runtime_add_ip(ip, prefixlen, lan_device)
+    _write_hotplug(cfg)
 
     _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
     _run(['uci', 'set', 'uhttpd.routekit=uhttpd'])
