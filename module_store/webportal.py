@@ -61,7 +61,7 @@ def _ensure_dnsmasq_confdir(path):
 
 
 def _cgi_script(users_dir):
-    return f'''#!/usr/bin/env python3
+    template = """#!/usr/bin/env python3
 import html
 import json
 import os
@@ -70,9 +70,9 @@ import subprocess
 import urllib.parse
 from pathlib import Path
 
-USERS_DIR = Path({users_dir!r})
+USERS_DIR = Path(__USERS_DIR__)
 DEFAULT_MODE = 'direct'
-MODES = {{'direct', 'standard', 'vpn_all'}}
+MODES = {'direct', 'standard', 'vpn_all'}
 
 
 def mac_for_ip(ip):
@@ -100,12 +100,12 @@ def user_file(uid):
 
 
 def load_user(path, uid, ip, mac):
-    data = {{}}
+    data = {}
     if path.exists():
         try:
             data = json.loads(path.read_text())
         except Exception:
-            data = {{}}
+            data = {}
     data.setdefault('id', uid)
     data['ip'] = ip
     data['mac'] = mac
@@ -138,7 +138,7 @@ def read_post():
     except ValueError:
         length = 0
     if length <= 0:
-        return {{}}
+        return {}
     body = os.read(0, length).decode(errors='ignore')
     return urllib.parse.parse_qs(body)
 
@@ -195,23 +195,24 @@ button{{padding:11px 16px;border-radius:8px;border:1px solid #6f8cff;background:
 </head>
 <body>
 <h1>RouteKit</h1>
-{{'<div class="ok">Сохранено</div>' if saved else ''}}
+{'<div class="ok">Сохранено</div>' if saved else ''}
 <section class="card">
-<p>IP: <code>{{html.escape(ip)}}</code></p>
-<p>MAC: <code>{{html.escape(mac or '-')}}</code></p>
-<p>Конфиг: <code>{{html.escape(str(path))}}</code></p>
+<p>IP: <code>{html.escape(ip)}</code></p>
+<p>MAC: <code>{html.escape(mac or '-')}</code></p>
+<p>Конфиг: <code>{html.escape(str(path))}</code></p>
 </section>
 <form method="post" class="card">
 <h2>Режим маршрутизации</h2>
-<label><input type="radio" name="mode" value="direct" {{checked(mode, 'direct')}}> напрямую</label>
-<label><input type="radio" name="mode" value="standard" {{checked(mode, 'standard')}}> список через VPN</label>
-<label><input type="radio" name="mode" value="vpn_all" {{checked(mode, 'vpn_all')}}> всё через VPN</label>
+<label><input type="radio" name="mode" value="direct" {checked(mode, 'direct')}> напрямую</label>
+<label><input type="radio" name="mode" value="standard" {checked(mode, 'standard')}> список через VPN</label>
+<label><input type="radio" name="mode" value="vpn_all" {checked(mode, 'vpn_all')}> всё через VPN</label>
 <button type="submit">Сохранить</button>
 <p class="muted">Для каждого клиента создаётся отдельный конфиг. По умолчанию используется режим напрямую.</p>
 </form>
 </body>
 </html>''')
-'''
+"""
+    return template.replace('__USERS_DIR__', repr(users_dir))
 
 
 def render(core, cfg):
