@@ -7,14 +7,14 @@ class CommandError(RuntimeError):
     pass
 
 
-def run(argv, check=True, capture=False):
-    if capture:
+def run(argv, check=True, capture=False, quiet=False):
+    if capture or quiet:
         p = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     else:
         p = subprocess.run(argv)
     if check and p.returncode != 0:
         detail = ''
-        if capture:
+        if capture or quiet:
             detail = f'\nstdout: {p.stdout}\nstderr: {p.stderr}'
         raise CommandError(f'command failed: {argv}{detail}')
     return p
@@ -36,10 +36,10 @@ def atomic_write(path, data, mode=0o644):
 def service_restart(name):
     script = Path('/etc/init.d') / name
     if script.exists():
-        run([str(script), 'restart'], check=False)
+        run([str(script), 'restart'], check=False, quiet=True)
 
 
 def service_reload(name):
     script = Path('/etc/init.d') / name
     if script.exists():
-        run([str(script), 'reload'], check=False)
+        run([str(script), 'reload'], check=False, quiet=True)
