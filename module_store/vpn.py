@@ -246,7 +246,7 @@ if os.environ.get('REQUEST_METHOD') == 'POST':
     saved = True
 if data.get('provider') not in PROVIDERS:
     data['provider'] = {default_provider!r}
-path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + chr(10), encoding='utf-8')
 respond({{'ok': True, 'mode': data['mode'], 'provider': data['provider'], 'saved': saved}})
 '''
 
