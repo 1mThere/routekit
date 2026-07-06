@@ -5,7 +5,7 @@ PRIORITY = 1000
 DEFAULTS = {
     'domain': 'v.be',
     'ip': '192.168.1.2',
-    'prefixlen': 24,
+    'prefixlen': 32,
     'home': '/www-routekit',
     'lan_device': 'br-lan',
     'lan_ip': 'auto',
@@ -67,6 +67,10 @@ def _lan_ip(cfg):
         return cfg['lan_ip']
     uci_ip = _out(['uci', '-q', 'get', 'network.lan.ipaddr'])
     return uci_ip or '192.168.1.1'
+
+
+def _portal_prefixlen(cfg):
+    return 32
 
 
 def _ensure_dnsmasq_confdir(path):
@@ -218,19 +222,19 @@ def _runtime_add_ip(ip, prefixlen, dev):
     current = _run(['ip', '-4', 'addr', 'show', 'dev', dev], capture=True)
     if current.returncode == 0 and addr in current.stdout:
         return
-    _run(['ip', 'addr', 'add', addr, 'dev', dev])
+    _run(['ip', 'addr', 'replace', addr, 'dev', dev])
 
 
 def _write_hotplug(cfg):
     ip = cfg['ip']
     dev = cfg.get('lan_device', 'br-lan')
-    prefixlen = int(cfg.get('prefixlen', 24))
+    prefixlen = _portal_prefixlen(cfg)
     path = cfg.get('hotplug', '/etc/hotplug.d/iface/90-routekit-webportal-ip')
     _write(path, f'''#!/bin/sh
 [ "$ACTION" = "ifup" ] || [ "$ACTION" = "ifupdate" ] || exit 0
 [ "$DEVICE" = "{dev}" ] || [ "$INTERFACE" = "lan" ] || exit 0
 ip -4 addr show dev "{dev}" | grep -q "{ip}/{prefixlen}" && exit 0
-ip addr add "{ip}/{prefixlen}" dev "{dev}" 2>/dev/null
+ip addr replace "{ip}/{prefixlen}" dev "{dev}" 2>/dev/null
 exit 0
 ''', 0o755)
 
@@ -269,7 +273,7 @@ def _bind_uhttpd(cfg):
 def apply(core, cfg):
     ip = cfg['ip']
     lan_device = cfg.get('lan_device', 'br-lan')
-    prefixlen = int(cfg.get('prefixlen', 24))
+    prefixlen = _portal_prefixlen(cfg)
 
     _runtime_add_ip(ip, prefixlen, lan_device)
     _write_hotplug(cfg)
@@ -284,6 +288,7 @@ def status(core, cfg):
     return {
         'domain': cfg.get('domain'),
         'ip': cfg.get('ip'),
+        'prefixlen': _portal_prefixlen(cfg),
         'home': cfg.get('home'),
         'users': users,
         'luci': _lan_ip(cfg),
