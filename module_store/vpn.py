@@ -1,6 +1,7 @@
 import ipaddress
 import json
 from pathlib import Path
+from subprocess import run, PIPE
 
 PRIORITY = 20
 DEFAULTS = {
@@ -13,6 +14,11 @@ DEFAULTS = {
     'mark': '0x00520000',
     'mark_mask': '0x00ff0000',
 }
+
+
+def _out(argv):
+    p = run(argv, text=True, stdout=PIPE, stderr=PIPE)
+    return ((p.stdout or '') + (p.stderr or '')).strip()
 
 
 def _write(path, data, mode=None):
@@ -97,19 +103,48 @@ def _set_block(name, ips=None):
         }}'''
 
 
-def _available_providers(core):
-    providers = []
+def _provider_modules(core):
+    out = []
     for name in core.enabled_names():
         if name in ('webportal', 'vpn'):
             continue
         try:
-            mod = core.load_module(name).py
+            loaded = core.load_module(name)
         except Exception:
             continue
-        provider = getattr(mod, 'PROVIDER', None)
+        provider = getattr(loaded.py, 'PROVIDER', None)
         if provider:
-            providers.append(str(provider))
-    return sorted(set(providers))
+            out.append((name, str(provider), loaded))
+    return out
+
+
+def _available_providers(core):
+    return sorted(set(provider for _, provider, _ in _provider_modules(core)))
+
+
+def _ready_providers(core):
+    ready = []
+    for name, provider, loaded in _provider_modules(core):
+        fn = getattr(loaded.py, 'is_ready', None)
+        if callable(fn):
+            try:
+                if fn(core, loaded.cfg()):
+                    ready.append(provider)
+            except Exception:
+                pass
+            continue
+        try:
+            st = loaded.status()
+            dev = str(st.get('device') or '')
+            if dev and dev not in ('-', 'not-ready'):
+                ready.append(provider)
+        except Exception:
+            pass
+    return sorted(set(ready))
+
+
+def _dnsmasq_supports_nftset():
+    return 'nftset' in _out(['dnsmasq', '--help']).lower()
 
 
 def _add_tile(core, html):
@@ -125,11 +160,13 @@ def _tile_no_providers():
 </section>'''
 
 
-def _tile(providers, items):
+def _tile(providers, items, ready):
     options = ''.join(f'<option value="{p}">{p}</option>' for p in providers)
     st_items = '\n'.join(items) if items else 'список пуст'
+    vpn_status = '' if ready else '<p class="status err">VPN ещё не готов. Трафик не перенаправляется.</p>'
     return f'''<section class="tile" id="vpn-tile">
 <h2>VPN</h2>
+{vpn_status}
 <form id="vpn-form">
 <label>Режим
 <select name="mode">
@@ -265,6 +302,7 @@ def enable(core, cfg):
 
 def render(core, cfg):
     providers = _available_providers(core)
+    ready = _ready_providers(core)
     items = _list_items(cfg['list_path'])
     domains, static_ips = _split_items(items)
     home = _web_home(core)
@@ -278,7 +316,8 @@ def render(core, cfg):
         return ['firewall', 'dnsmasq'] if changed else []
 
     default_provider = providers[0]
-    _add_tile(core, _tile(providers, items))
+    routing_ready = bool(ready)
+    _add_tile(core, _tile(providers, items, routing_ready))
     _write(home / 'cgi-bin' / 'routekit-vpn', _api(cfg['users_dir'], default_provider, providers), 0o755)
 
     users = _users(cfg['users_dir'])
@@ -286,14 +325,19 @@ def render(core, cfg):
     fw4_dir = Path(core.config['fw4_post_dir'])
     changed = False
 
-    dns_lines = [f'nftset=/{d}/4#inet#fw4#{cfg["dst_set"]}' for d in domains]
+    dns_domains = domains if routing_ready and _dnsmasq_supports_nftset() else []
+    dns_lines = [f'nftset=/{d}/4#inet#fw4#{cfg["dst_set"]}' for d in dns_domains]
     changed |= _write(dnsmasq_dir / 'routekit-vpn.conf', '\n'.join(dns_lines) + ('\n' if dns_lines else ''))
 
-    standard_ips = [u['ip'] for u in users if u.get('mode') == 'standard']
-    all_ips = [u['ip'] for u in users if u.get('mode') == 'vpn_all']
+    if routing_ready:
+        standard_ips = [u['ip'] for u in users if u.get('mode') == 'standard']
+        all_ips = [u['ip'] for u in users if u.get('mode') == 'vpn_all']
+    else:
+        standard_ips = []
+        all_ips = []
     lan = core.config.get('lan_iface', 'br-lan')
     nft = f'''table inet fw4 {{
-{_set_block(cfg['dst_set'], static_ips)}
+{_set_block(cfg['dst_set'], static_ips if routing_ready else [])}
 
 {_set_block(cfg['standard_src_set'], standard_ips)}
 
@@ -314,8 +358,10 @@ def render(core, cfg):
 def status(core, cfg):
     users = _users(cfg['users_dir'])
     providers = _available_providers(core)
+    ready = _ready_providers(core)
     return {
         'providers': ', '.join(providers) if providers else '-',
+        'ready': ', '.join(ready) if ready else 'no',
         'list': len(_list_items(cfg['list_path'])),
         'users': len(users),
     }
