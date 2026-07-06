@@ -1,5 +1,6 @@
 import importlib.util
 import subprocess
+import time
 import urllib.request
 from pathlib import Path
 
@@ -69,30 +70,57 @@ class Core:
     def module_path(self, name):
         return MODULE_DIR / f'{name}.py'
 
+    def _download_with_curl(self, url, tmp):
+        return subprocess.run(
+            [
+                'curl',
+                '-fsSL',
+                '--retry', '3',
+                '--retry-delay', '1',
+                '--retry-all-errors',
+                '--connect-timeout', '8',
+                '--max-time', '45',
+                '--speed-time', '10',
+                '--speed-limit', '512',
+                url,
+                '-o', str(tmp),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def _download_with_urllib(self, url):
+        req = urllib.request.Request(url, headers={'User-Agent': 'routekit'})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.read().decode('utf-8')
+
     def download_module(self, name, url, path):
         tmp = path.with_suffix('.tmp')
         errors = []
+        if tmp.exists():
+            tmp.unlink()
+
+        for attempt in range(1, 4):
+            curl = self._download_with_curl(url, tmp)
+            if curl.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+                tmp.replace(path)
+                return
+            errors.append(f'curl attempt {attempt}: {curl.stderr.strip() or curl.returncode}')
+            if tmp.exists():
+                tmp.unlink()
+            time.sleep(1)
 
         try:
-            with urllib.request.urlopen(url, timeout=90) as r:
-                data = r.read().decode('utf-8')
+            data = self._download_with_urllib(url)
+            if not data.strip():
+                raise RuntimeError('empty response')
             tmp.write_text(data, encoding='utf-8')
             tmp.replace(path)
             return
         except Exception as e:
             errors.append(f'python urllib: {e}')
 
-        curl = subprocess.run(
-            ['curl', '-fL', '--connect-timeout', '20', '--max-time', '180', url, '-o', str(tmp)],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if curl.returncode == 0:
-            tmp.replace(path)
-            return
-
-        errors.append(f'curl: {curl.stderr.strip()}')
         if tmp.exists():
             tmp.unlink()
         raise SystemExit('cannot download module ' + name + '\n' + '\n'.join(errors))
