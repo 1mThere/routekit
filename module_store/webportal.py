@@ -8,6 +8,7 @@ DEFAULTS = {
     'prefixlen': 24,
     'home': '/www-routekit',
     'lan_device': 'br-lan',
+    'lan_ip': 'auto',
     'hotplug': '/etc/hotplug.d/iface/90-routekit-webportal-ip',
 }
 
@@ -16,6 +17,13 @@ def _run(argv, check=False, capture=False):
     if capture:
         return run(argv, check=check, text=True, stdout=PIPE, stderr=PIPE)
     return run(argv, check=check)
+
+
+def _out(argv):
+    p = _run(argv, capture=True)
+    if p.returncode != 0:
+        return ''
+    return p.stdout.strip()
 
 
 def _write(path, data, mode=None):
@@ -35,6 +43,13 @@ def enable(core, cfg):
     cfg['domain'] = _ask('portal domain', cfg.get('domain', 'v.be'))
     cfg['ip'] = _ask('portal ip', cfg.get('ip', '192.168.1.2'))
     cfg['home'] = cfg.get('home', '/www-routekit')
+
+
+def _lan_ip(cfg):
+    if cfg.get('lan_ip') and cfg.get('lan_ip') != 'auto':
+        return cfg['lan_ip']
+    uci_ip = _out(['uci', '-q', 'get', 'network.lan.ipaddr'])
+    return uci_ip or '192.168.1.1'
 
 
 def _ensure_dnsmasq_confdir(path):
@@ -92,24 +107,40 @@ exit 0
 ''', 0o755)
 
 
+def _bind_uhttpd(cfg):
+    portal_ip = cfg['ip']
+    lan_ip = _lan_ip(cfg)
+    home = cfg['home']
+
+    _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
+    _run(['uci', 'set', 'uhttpd.routekit=uhttpd'])
+    _run(['uci', 'add_list', f'uhttpd.routekit.listen_http={portal_ip}:80'])
+    _run(['uci', 'set', f'uhttpd.routekit.home={home}'])
+    _run(['uci', 'set', 'uhttpd.routekit.cgi_prefix=/cgi-bin'])
+
+    _run(['uci', '-q', 'delete', 'uhttpd.main.listen_http'])
+    _run(['uci', '-q', 'delete', 'uhttpd.main.listen_https'])
+    _run(['uci', 'add_list', f'uhttpd.main.listen_http={lan_ip}:80'])
+    _run(['uci', 'add_list', f'uhttpd.main.listen_https={lan_ip}:443'])
+
+    _run(['uci', 'commit', 'uhttpd'])
+
+
 def apply(core, cfg):
     ip = cfg['ip']
-    home = cfg['home']
     lan_device = cfg.get('lan_device', 'br-lan')
     prefixlen = int(cfg.get('prefixlen', 24))
 
     _runtime_add_ip(ip, prefixlen, lan_device)
     _write_hotplug(cfg)
-
-    _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
-    _run(['uci', 'set', 'uhttpd.routekit=uhttpd'])
-    _run(['uci', 'set', f'uhttpd.routekit.home={home}'])
-    _run(['uci', 'set', f'uhttpd.routekit.listen_http={ip}:80'])
-    _run(['uci', 'set', 'uhttpd.routekit.cgi_prefix=/cgi-bin'])
-    _run(['uci', 'commit', 'uhttpd'])
-
+    _bind_uhttpd(cfg)
     _run(['/etc/init.d/uhttpd', 'restart'])
 
 
 def status(core, cfg):
-    return {'domain': cfg.get('domain'), 'ip': cfg.get('ip'), 'home': cfg.get('home')}
+    return {
+        'domain': cfg.get('domain'),
+        'ip': cfg.get('ip'),
+        'home': cfg.get('home'),
+        'luci': _lan_ip(cfg),
+    }
