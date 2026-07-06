@@ -1,5 +1,6 @@
 import argparse
 import ipaddress
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -146,11 +147,11 @@ def cmd_doctor(args):
     Core().doctor()
 
 
-def _run(argv, label=None):
+def _run(argv, label=None, check=True):
     p = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if p.stdout:
         print(p.stdout, end='')
-    if p.returncode != 0:
+    if check and p.returncode != 0:
         msg = (p.stderr or '').strip() or f'exit code {p.returncode}'
         name = label or argv[0]
         raise SystemExit(f'{name} failed: {msg}')
@@ -200,6 +201,75 @@ def cmd_update(args):
     print('routekit updated')
 
 
+def _rm(path):
+    path = Path(path)
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _restore_uhttpd():
+    backup = Path('/etc/routekit/backups/uhttpd.before-webportal')
+    dst = Path('/etc/config/uhttpd')
+    if backup.exists():
+        shutil.copy2(backup, dst)
+        return
+    rom = Path('/rom/etc/config/uhttpd')
+    if rom.exists():
+        shutil.copy2(rom, dst)
+        return
+    _run(['uci', '-q', 'delete', 'uhttpd.routekit'], check=False)
+    _run(['uci', '-q', 'set', 'uhttpd.main=uhttpd'], check=False)
+    _run(['uci', '-q', 'delete', 'uhttpd.main.listen_http'], check=False)
+    _run(['uci', '-q', 'delete', 'uhttpd.main.listen_https'], check=False)
+    _run(['uci', 'add_list', 'uhttpd.main.listen_http=0.0.0.0:80'], check=False)
+    _run(['uci', 'add_list', 'uhttpd.main.listen_http=[::]:80'], check=False)
+    _run(['uci', 'add_list', 'uhttpd.main.listen_https=0.0.0.0:443'], check=False)
+    _run(['uci', 'add_list', 'uhttpd.main.listen_https=[::]:443'], check=False)
+    _run(['uci', 'set', 'uhttpd.main.home=/www'], check=False)
+    _run(['uci', 'set', 'uhttpd.main.cgi_prefix=/cgi-bin'], check=False)
+    _run(['uci', 'set', 'uhttpd.main.redirect_https=0'], check=False)
+    _run(['uci', 'commit', 'uhttpd'], check=False)
+
+
+def cmd_uninstall(args):
+    c = Core()
+    try:
+        c.rescue()
+    except Exception as e:
+        print(f'rescue failed: {e}')
+
+    for dev in ('br-lan',):
+        for addr in ('192.168.1.2/32', '192.168.1.2/24'):
+            _run(['ip', 'addr', 'del', addr, 'dev', dev], check=False)
+
+    _run(['uci', '-q', 'delete', 'uhttpd.routekit'], check=False)
+    _restore_uhttpd()
+
+    for p in [
+        '/etc/hotplug.d/iface/90-routekit-webportal-ip',
+        '/www-routekit',
+        '/etc/dnsmasq.d/routekit-webportal.conf',
+        '/etc/dnsmasq.d/routekit-vpn.conf',
+        '/etc/dnsmasq.d/routekit-domain-vpn.conf',
+        '/usr/share/nftables.d/ruleset-post/40-routekit-vpn.nft',
+        '/usr/share/nftables.d/ruleset-post/40-routekit-domain-vpn.nft',
+        '/var/lib/routekit',
+        '/usr/lib/routekit',
+        '/etc/routekit',
+        '/usr/bin/rk',
+    ]:
+        _rm(p)
+
+    for svc in ('firewall', 'dnsmasq', 'uhttpd'):
+        _run([f'/etc/init.d/{svc}', 'restart'], check=False)
+    print('routekit uninstalled')
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog='rk')
     sub = p.add_subparsers(dest='cmd', required=True)
@@ -216,6 +286,9 @@ def build_parser():
     s = sub.add_parser('update')
     s.add_argument('--no-apply', action='store_true')
     s.set_defaults(func=cmd_update)
+
+    s = sub.add_parser('uninstall')
+    s.set_defaults(func=cmd_uninstall)
 
     s = sub.add_parser('enable')
     s.add_argument('name')
