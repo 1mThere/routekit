@@ -2,7 +2,7 @@
 
 RouteKit is a Python orchestrator for OpenWrt.
 
-The core installs `rk`, stores config, downloads enabled modules, and runs the apply lifecycle. Features live in modules.
+The core is intentionally small. It installs `rk`, stores config, downloads enabled modules, and runs the apply lifecycle. Features live in modules.
 
 ## Install on OpenWrt
 
@@ -36,7 +36,6 @@ rk modules update webportal
 ## Modules
 
 ```sh
-rk enable gateway
 rk enable webportal
 rk enable vpn
 rk enable openvpn
@@ -45,10 +44,8 @@ rk enable openvpn
 Dependency order:
 
 ```text
-gateway -> webportal -> vpn -> provider modules
+webportal -> vpn -> provider modules
 ```
-
-`gateway` owns the base LAN client path: LAN firewall zone, WAN firewall zone, masquerading, IPv4 forwarding, and LAN-to-WAN forwarding. It is intentionally separate from `vpn`; direct client internet must not depend on a VPN provider.
 
 `webportal` creates the local portal and lets enabled modules insert their own tiles.
 
