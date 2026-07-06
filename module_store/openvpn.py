@@ -1,5 +1,6 @@
 import json
 import shutil
+import time
 import urllib.request
 from pathlib import Path
 from subprocess import run, PIPE
@@ -15,6 +16,7 @@ DEFAULTS = {
     'mark': '0x00520000',
     'mark_mask': '0x00ff0000',
     'priority': 25000,
+    'wait_seconds': 20,
 }
 
 
@@ -96,6 +98,16 @@ def _ready_dev(cfg):
     return ''
 
 
+def _wait_ready_dev(cfg):
+    timeout = int(cfg.get('wait_seconds', 20))
+    for _ in range(max(timeout, 1)):
+        dev = _ready_dev(cfg)
+        if dev:
+            return dev
+        time.sleep(1)
+    return ''
+
+
 def enable(core, cfg):
     src = _normalize_source(_ask('OpenVPN config file path or URL', ''))
     if src:
@@ -148,9 +160,11 @@ def apply(core, cfg):
         with rt.open('a', encoding='utf-8') as f:
             f.write(f'{table_id} {table_name}\n')
 
-    dev = _ready_dev(cfg)
+    dev = _wait_ready_dev(cfg)
     if not dev:
-        print('openvpn: device is not ready yet')
+        expected = _expected_dev(cfg) or 'auto'
+        print(f'openvpn: device is not ready yet, expected {expected}')
+        print('openvpn: check logread -e openvpn')
         return
 
     _run(['uci', '-q', 'delete', f'network.{iface}'])
