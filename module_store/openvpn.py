@@ -4,6 +4,7 @@ import urllib.request
 from pathlib import Path
 from subprocess import run, PIPE
 
+PROVIDER = 'openvpn'
 PRIORITY = 30
 DEFAULTS = {
     'interface': 'vpnclient',
