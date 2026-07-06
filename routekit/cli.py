@@ -26,16 +26,9 @@ def cmd_disable(args):
     print(f'disabled: {args.name}')
 
 
-def _module_update(c, name=None, all_modules=False):
-    if name:
-        c.refresh_module(name)
-    else:
-        c.refresh_modules(enabled_only=not all_modules)
-
-
-def cmd_module(args):
+def cmd_modules(args):
     c = Core()
-    if args.module_cmd == 'list':
+    if args.modules_cmd == 'list':
         enabled = set(c.enabled_names())
         for name, reg in sorted(c.registry().items()):
             status = 'enabled' if name in enabled else 'disabled'
@@ -43,17 +36,20 @@ def cmd_module(args):
             deps = ','.join(reg.get('deps', [])) or '-'
             downloaded = 'downloaded' if c.module_path(name).exists() else 'not-downloaded'
             print(f'{name}\t{status}\t{impl}\tdeps={deps}\t{downloaded}')
-    elif args.module_cmd == 'set':
+    elif args.modules_cmd == 'set':
         c.set_module_value(args.name, args.key, args.value)
         print(f'set: {args.name}.{args.key}={args.value}')
-    elif args.module_cmd == 'status':
+    elif args.modules_cmd == 'status':
         if args.name not in c.enabled_names():
             raise SystemExit(f'module is not enabled: {args.name}')
         mod = c.load_module(args.name)
         for k, v in mod.status().items():
             print(f'{k}: {v}')
-    elif args.module_cmd in ('update', 'refresh'):
-        _module_update(c, getattr(args, 'name', None), getattr(args, 'all', False))
+    elif args.modules_cmd == 'update':
+        if args.name:
+            c.refresh_module(args.name)
+        else:
+            c.refresh_modules(enabled_only=not args.all)
         print('modules updated')
 
 
@@ -114,25 +110,16 @@ def _install_from_git(repo):
     _run(['python3', str(repo / 'install.py'), '--source', str(repo)])
 
 
-def _do_update(no_apply=False):
+def cmd_update(args):
     repo = Path('/opt/routekit')
     if (repo / '.git').exists():
         _install_from_git(repo)
     else:
         _install_from_archive()
     _run(['/usr/bin/rk', 'modules', 'update'])
-    if not no_apply:
+    if not args.no_apply:
         _run(['/usr/bin/rk', 'apply'])
     print('routekit updated')
-
-
-def cmd_update(args):
-    _do_update(no_apply=args.no_apply)
-
-
-def cmd_self(args):
-    if args.self_cmd == 'update':
-        _do_update(no_apply=args.no_apply)
 
 
 def build_parser():
@@ -160,27 +147,22 @@ def build_parser():
     s.add_argument('name')
     s.set_defaults(func=cmd_disable)
 
-    for module_cmd_name in ('module', 'modules'):
-        s = sub.add_parser(module_cmd_name)
-        msub = s.add_subparsers(dest='module_cmd', required=True)
-        x = msub.add_parser('list')
-        x.set_defaults(func=cmd_module)
-        x = msub.add_parser('set')
-        x.add_argument('name')
-        x.add_argument('key')
-        x.add_argument('value')
-        x.set_defaults(func=cmd_module)
-        x = msub.add_parser('status')
-        x.add_argument('name')
-        x.set_defaults(func=cmd_module)
-        x = msub.add_parser('update')
-        x.add_argument('name', nargs='?')
-        x.add_argument('--all', action='store_true')
-        x.set_defaults(func=cmd_module)
-        x = msub.add_parser('refresh')
-        x.add_argument('name', nargs='?')
-        x.add_argument('--all', action='store_true')
-        x.set_defaults(func=cmd_module)
+    s = sub.add_parser('modules')
+    msub = s.add_subparsers(dest='modules_cmd', required=True)
+    x = msub.add_parser('list')
+    x.set_defaults(func=cmd_modules)
+    x = msub.add_parser('set')
+    x.add_argument('name')
+    x.add_argument('key')
+    x.add_argument('value')
+    x.set_defaults(func=cmd_modules)
+    x = msub.add_parser('status')
+    x.add_argument('name')
+    x.set_defaults(func=cmd_modules)
+    x = msub.add_parser('update')
+    x.add_argument('name', nargs='?')
+    x.add_argument('--all', action='store_true')
+    x.set_defaults(func=cmd_modules)
 
     s = sub.add_parser('domain')
     dsub = s.add_subparsers(dest='domain_cmd', required=True)
@@ -195,12 +177,6 @@ def build_parser():
     x = dsub.add_parser('replace')
     x.add_argument('domains', nargs='+')
     x.set_defaults(func=cmd_domain)
-
-    s = sub.add_parser('self')
-    ss = s.add_subparsers(dest='self_cmd', required=True)
-    x = ss.add_parser('update')
-    x.add_argument('--no-apply', action='store_true')
-    x.set_defaults(func=cmd_self)
 
     return p
 
