@@ -1,3 +1,4 @@
+import re
 import shutil
 from pathlib import Path
 from subprocess import run, PIPE
@@ -69,7 +70,10 @@ def _plain_ip(value, fallback='192.168.1.1'):
     value = str(value or '').strip()
     if not value or value == 'auto':
         return fallback
-    return value.split('/', 1)[0]
+    match = re.search(r'(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)', value)
+    if match:
+        return match.group(0)
+    return fallback
 
 
 def _ask(prompt, default):
@@ -80,7 +84,11 @@ def _ask(prompt, default):
 def _lan_ip(cfg):
     if cfg.get('lan_ip') and cfg.get('lan_ip') != 'auto':
         return _plain_ip(cfg['lan_ip'])
-    return _plain_ip(_out(['uci', '-q', 'get', 'network.lan.ipaddr']))
+    ip = _plain_ip(_out(['uci', '-q', 'get', 'network.lan.ipaddr']), '')
+    if ip:
+        return ip
+    dev = cfg.get('lan_device', 'br-lan')
+    return _plain_ip(_out(['ip', '-4', 'addr', 'show', 'dev', dev]))
 
 
 def _legacy_ip(cfg):
@@ -294,12 +302,13 @@ def _restore_www_index(cfg):
 
 
 def _bind_uhttpd(cfg):
+    lan_ip = _lan_ip(cfg)
     _backup_uhttpd(cfg)
     _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
     _run(['uci', '-q', 'set', 'uhttpd.main=uhttpd'])
     _run(['uci', '-q', 'delete', 'uhttpd.main.listen_http'])
     _run(['uci', '-q', 'delete', 'uhttpd.main.listen_https'])
-    _run(['uci', 'add_list', 'uhttpd.main.listen_http=0.0.0.0:80'])
+    _run(['uci', 'add_list', f'uhttpd.main.listen_http={lan_ip}:80'])
     _run(['uci', 'set', 'uhttpd.main.home=/www'])
     _run(['uci', 'set', 'uhttpd.main.cgi_prefix=/cgi-bin'])
     _run(['uci', 'set', 'uhttpd.main.redirect_https=0'])
