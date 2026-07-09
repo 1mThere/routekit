@@ -156,7 +156,7 @@ def _add_tile(core, html):
 def _tile_no_providers():
     return '''<section class="tile" id="vpn-tile">
 <h2>VPN</h2>
-<p class="status">Провайдеров не найдено</p>
+<p class="status err">Провайдеров нет. Включи openvpn и примени конфиг.</p>
 </section>'''
 
 
@@ -189,27 +189,30 @@ def _tile(providers, items, ready):
 </form>
 <script>
 (() => {{
-  const api = '/cgi-bin/routekit-vpn';
+  const url = '/cgi-bin/routekit-vpn';
   const form = document.getElementById('vpn-form');
   const status = document.getElementById('vpn-status');
   const stlist = document.getElementById('vpn-stlist');
   function setStatus(text, cls) {{ status.textContent = text; status.className = 'status ' + (cls || ''); }}
   function syncList() {{ stlist.style.display = form.mode.value === 'standard' ? 'block' : 'none'; }}
   function fill(data) {{
-    if (!data.ok) {{ setStatus(data.error || 'Ошибка', 'err'); return; }}
+    if (!data.ok) {{ setStatus(data.error || 'Не удалось загрузить настройки', 'err'); return; }}
     if (form.mode.querySelector('option[value="' + data.mode + '"]')) form.mode.value = data.mode;
     if (form.provider.querySelector('option[value="' + data.provider + '"]')) form.provider.value = data.provider;
     syncList();
     setStatus(data.saved ? 'Сохранено' : '', data.saved ? 'ok' : '');
   }}
+  function load() {{
+    fetch(url, {{cache:'no-store'}}).then(r => r.json()).then(fill).catch(() => setStatus('Не удалось загрузить настройки', 'err'));
+  }}
   form.mode.addEventListener('change', syncList);
-  fetch(api, {{cache:'no-store'}}).then(r => r.json()).then(fill).catch(e => setStatus('API не ответил', 'err'));
   form.addEventListener('submit', e => {{
     e.preventDefault();
     setStatus('Сохранение...');
-    fetch(api, {{method:'POST', body:new URLSearchParams(new FormData(form))}})
-      .then(r => r.json()).then(fill).catch(e => setStatus('Не сохранилось', 'err'));
+    fetch(url, {{method:'POST', body:new URLSearchParams(new FormData(form))}})
+      .then(r => r.json()).then(fill).catch(() => setStatus('Не сохранилось', 'err'));
   }});
+  load();
 }})();
 </script>
 </section>'''
@@ -234,6 +237,7 @@ MODES = {{'direct', 'standard', 'vpn_all'}}
 
 def respond(data):
     print('Content-Type: application/json; charset=utf-8')
+    print('Cache-Control: no-store')
     print()
     print(json.dumps(data, ensure_ascii=False))
 
@@ -276,37 +280,40 @@ def sync_nft(ip, mode):
     return True
 
 
-ip = os.environ.get('REMOTE_ADDR', '')
-mac = mac_for_ip(ip)
-uid = uid_for(ip, mac)
-USERS_DIR.mkdir(parents=True, exist_ok=True)
-path = USERS_DIR / (uid + '.json')
 try:
-    data = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {{}}
-except Exception:
-    data = {{}}
-data.setdefault('id', uid)
-data['ip'] = ip
-data['mac'] = mac
-data.setdefault('mode', 'direct')
-data.setdefault('provider', {default_provider!r})
-saved = False
-live = False
-if os.environ.get('REQUEST_METHOD') == 'POST':
-    form = read_post()
-    mode = (form.get('mode') or [''])[0]
-    provider = (form.get('provider') or [''])[0]
-    if mode in MODES:
-        data['mode'] = mode
-    if provider in PROVIDERS:
-        data['provider'] = provider
-    saved = True
-if data.get('provider') not in PROVIDERS:
-    data['provider'] = {default_provider!r}
-path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + chr(10), encoding='utf-8')
-if saved:
-    live = sync_nft(data.get('ip'), data.get('mode'))
-respond({{'ok': True, 'mode': data['mode'], 'provider': data['provider'], 'saved': saved, 'live': live}})
+    ip = os.environ.get('REMOTE_ADDR', '')
+    mac = mac_for_ip(ip)
+    uid = uid_for(ip, mac)
+    USERS_DIR.mkdir(parents=True, exist_ok=True)
+    path = USERS_DIR / (uid + '.json')
+    try:
+        data = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {{}}
+    except Exception:
+        data = {{}}
+    data.setdefault('id', uid)
+    data['ip'] = ip
+    data['mac'] = mac
+    data.setdefault('mode', 'direct')
+    data.setdefault('provider', {default_provider!r})
+    saved = False
+    live = False
+    if os.environ.get('REQUEST_METHOD') == 'POST':
+        form = read_post()
+        mode = (form.get('mode') or [''])[0]
+        provider = (form.get('provider') or [''])[0]
+        if mode in MODES:
+            data['mode'] = mode
+        if provider in PROVIDERS:
+            data['provider'] = provider
+        saved = True
+    if data.get('provider') not in PROVIDERS:
+        data['provider'] = {default_provider!r}
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + chr(10), encoding='utf-8')
+    if saved:
+        live = sync_nft(data.get('ip'), data.get('mode'))
+    respond({{'ok': True, 'mode': data['mode'], 'provider': data['provider'], 'saved': saved, 'live': live}})
+except Exception as e:
+    respond({{'ok': False, 'error': str(e)}})
 '''
 
 
