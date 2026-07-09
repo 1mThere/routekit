@@ -160,11 +160,9 @@ def _tile_no_providers():
 </section>'''
 
 
-def _provider_control(providers):
+def _provider_field(providers):
     if len(providers) == 1:
-        provider = providers[0]
-        return f'''<input type="hidden" name="provider" value="{provider}">
-<p class="status">Протокол: {provider}</p>'''
+        return f'<input type="hidden" name="provider" value="{providers[0]}">'
     options = ''.join(f'<option value="{p}">{p}</option>' for p in providers)
     return f'''<label>Протокол
 <select name="provider">
@@ -174,7 +172,7 @@ def _provider_control(providers):
 
 
 def _tile(providers, items, ready):
-    provider_control = _provider_control(providers)
+    provider_field = _provider_field(providers)
     st_items = '\n'.join(items) if items else 'список пуст'
     vpn_status = '' if ready else '<p class="status err">VPN ещё не готов. Трафик может не пройти.</p>'
     return f'''<section class="tile" id="vpn-tile">
@@ -192,7 +190,7 @@ def _tile(providers, items, ready):
 <summary>Стандартный список</summary>
 <pre>{st_items}</pre>
 </details>
-{provider_control}
+{provider_field}
 <button type="submit">Сохранить</button>
 <p class="status" id="vpn-status"></p>
 </form>
@@ -202,27 +200,30 @@ def _tile(providers, items, ready):
   const form = document.getElementById('vpn-form');
   const status = document.getElementById('vpn-status');
   const stlist = document.getElementById('vpn-stlist');
+  const provider = form.querySelector('[name="provider"]');
   function setStatus(text, cls) {{ status.textContent = text; status.className = 'status ' + (cls || ''); }}
   function syncList() {{ stlist.style.display = form.mode.value === 'standard' ? 'block' : 'none'; }}
-  function parseJson(r) {{ return r.text().then(t => {{ if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 160)); try {{ return JSON.parse(t); }} catch (e) {{ throw new Error(t.slice(0, 160) || String(e)); }} }}); }}
-  function providerField() {{ return form.elements.provider; }}
+  async function readJson(response) {{
+    const text = await response.text();
+    if (!response.ok) throw new Error('HTTP ' + response.status + ': ' + text.slice(0, 120));
+    try {{ return JSON.parse(text); }} catch (e) {{ throw new Error('Не JSON: ' + text.slice(0, 120)); }}
+  }}
   function fill(data) {{
     if (!data.ok) {{ setStatus(data.error || 'Не удалось загрузить настройки', 'err'); return; }}
     if (form.mode.querySelector('option[value="' + data.mode + '"]')) form.mode.value = data.mode;
-    const p = providerField();
-    if (p && p.tagName === 'SELECT' && p.querySelector('option[value="' + data.provider + '"]')) p.value = data.provider;
+    if (provider && provider.tagName === 'SELECT' && provider.querySelector('option[value="' + data.provider + '"]')) provider.value = data.provider;
+    if (provider && provider.tagName === 'INPUT') provider.value = data.provider;
     syncList();
     setStatus(data.saved ? 'Сохранено' : '', data.saved ? 'ok' : '');
   }}
-  function load() {{
-    fetch(url, {{cache:'no-store'}}).then(parseJson).then(fill).catch(e => setStatus(String(e.message || e), 'err'));
-  }}
+  function fail(e, fallback) {{ setStatus((e && e.message) ? e.message : fallback, 'err'); }}
+  function load() {{ fetch(url, {{cache:'no-store'}}).then(readJson).then(fill).catch(e => fail(e, 'Не удалось загрузить настройки')); }}
   form.mode.addEventListener('change', syncList);
   form.addEventListener('submit', e => {{
     e.preventDefault();
     setStatus('Сохранение...');
     fetch(url, {{method:'POST', body:new URLSearchParams(new FormData(form))}})
-      .then(parseJson).then(fill).catch(e => setStatus(String(e.message || e), 'err'));
+      .then(readJson).then(fill).catch(e => fail(e, 'Не сохранилось'));
   }});
   load();
 }})();
