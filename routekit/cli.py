@@ -214,25 +214,10 @@ def _rm(path):
 
 def _restore_uhttpd():
     backup = Path('/etc/routekit/backups/uhttpd.before-webportal')
-    dst = Path('/etc/config/uhttpd')
     if backup.exists():
-        shutil.copy2(backup, dst)
-        return
-    rom = Path('/rom/etc/config/uhttpd')
-    if rom.exists():
-        shutil.copy2(rom, dst)
+        shutil.copy2(backup, '/etc/config/uhttpd')
         return
     _run(['uci', '-q', 'delete', 'uhttpd.routekit'], check=False)
-    _run(['uci', '-q', 'set', 'uhttpd.main=uhttpd'], check=False)
-    _run(['uci', '-q', 'delete', 'uhttpd.main.listen_http'], check=False)
-    _run(['uci', '-q', 'delete', 'uhttpd.main.listen_https'], check=False)
-    _run(['uci', 'add_list', 'uhttpd.main.listen_http=0.0.0.0:80'], check=False)
-    _run(['uci', 'add_list', 'uhttpd.main.listen_http=[::]:80'], check=False)
-    _run(['uci', 'add_list', 'uhttpd.main.listen_https=0.0.0.0:443'], check=False)
-    _run(['uci', 'add_list', 'uhttpd.main.listen_https=[::]:443'], check=False)
-    _run(['uci', 'set', 'uhttpd.main.home=/www'], check=False)
-    _run(['uci', 'set', 'uhttpd.main.cgi_prefix=/cgi-bin'], check=False)
-    _run(['uci', 'set', 'uhttpd.main.redirect_https=0'], check=False)
     _run(['uci', 'commit', 'uhttpd'], check=False)
 
 
@@ -243,15 +228,10 @@ def cmd_uninstall(args):
     except Exception as e:
         print(f'rescue failed: {e}')
 
-    for dev in ('br-lan',):
-        for addr in ('192.168.1.2/32', '192.168.1.2/24'):
-            _run(['ip', 'addr', 'del', addr, 'dev', dev], check=False)
-
     _run(['uci', '-q', 'delete', 'uhttpd.routekit'], check=False)
     _restore_uhttpd()
 
     for p in [
-        '/etc/hotplug.d/iface/90-routekit-webportal-ip',
         '/www-routekit',
         '/etc/dnsmasq.d/routekit-webportal.conf',
         '/etc/dnsmasq.d/routekit-vpn.conf',
