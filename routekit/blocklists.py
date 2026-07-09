@@ -6,13 +6,39 @@ from .domains import normalize_domain
 
 DEFAULT_STANDARD_URLS = (
     'https://antifilter.download/list/domains.lst',
-    'https://antifilter.download/list/community.lst',
-    'https://antifilter.download/list/ipsum.lst',
+    'https://antifilter.download/list/urls.lst',
+    'https://antifilter.download/list/allyouneed.lst',
+    'https://community.antifilter.download/list/domains.lst',
+    'https://community.antifilter.download/list/community.lst',
+    'https://raw.githubusercontent.com/barl0g/foreign-geo-blocklist-russia/main/domains.txt',
+)
+
+FALLBACK_STANDARD = (
+    'chatgpt.com',
+    'openai.com',
+    'oaistatic.com',
+    'cdn.oaistatic.com',
+    'perplexity.ai',
+    'linkedin.com',
+    'truthsocial.com',
+    'medium.com',
+    'rutracker.org',
+    'theins.ru',
+    'meduza.io',
+    'bbc.com',
+    'bbc.co.uk',
+    'discord.com',
+    'discordapp.com',
+    'signal.org',
+    'instagram.com',
+    'facebook.com',
+    'x.com',
+    'twitter.com',
 )
 
 
 def normalize_item(item):
-    item = str(item or '').strip()
+    item = str(item or '').strip().lower()
     if not item or item.startswith('#') or item.startswith('!'):
         return None
     item = item.split('#', 1)[0].strip()
@@ -20,6 +46,8 @@ def normalize_item(item):
         return None
     if item.startswith('||') and item.endswith('^'):
         item = item[2:-1]
+    if item.startswith('domain:'):
+        item = item[7:]
     try:
         net = ipaddress.ip_network(item, strict=False)
         if net.version == 4:
@@ -54,7 +82,8 @@ def fetch_default_standard_list(urls=DEFAULT_STANDARD_URLS):
         except Exception as e:
             errors.append(f'{url}: {e}')
     if not items:
-        raise RuntimeError('cannot download default standard list' + ('\n' + '\n'.join(errors) if errors else ''))
+        items.update(FALLBACK_STANDARD)
+        errors.append('fallback standard list used')
     return sorted(items), errors
 
 
@@ -64,5 +93,13 @@ def write_default_standard_list(path, overwrite=False):
         return False, 0, []
     items, errors = fetch_default_standard_list()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text('\n'.join(items) + '\n', encoding='utf-8')
+    lines = [
+        '# RouteKit standard list',
+        '# Sources:',
+        *[f'# {url}' for url in DEFAULT_STANDARD_URLS],
+        '',
+        *items,
+        '',
+    ]
+    path.write_text('\n'.join(lines), encoding='utf-8')
     return True, len(items), errors
