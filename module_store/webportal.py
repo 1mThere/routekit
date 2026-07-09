@@ -119,6 +119,7 @@ def render(core, cfg):
     dns_changed = _write(dns_dir / 'routekit-webportal.conf', f'address=/{_get(cfg, "domain")}/{ip}\n')
     _write(home / 'index.html', _index_html(list(getattr(core, 'portal_tiles', []))))
     _write(home / 'cgi-bin' / 'routekit-user', _user_api(str(users_dir)), 0o755)
+    _write(home / 'cgi-bin' / 'luci', _luci_redirect(), 0o755)
 
     return ['dnsmasq', 'uhttpd'] if dns_changed else ['uhttpd']
 
@@ -201,6 +202,9 @@ def _index_html(tiles):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>RouteKit</title>
 <style>body{{max-width:960px;margin:38px auto;padding:0 18px;background:#0b0d10;color:#e7eaf0;font-family:Arial,sans-serif}}section{{background:#11151b;border:1px solid #2a303a;border-radius:12px;padding:18px 20px;margin:14px 0}}select,button{{padding:10px}}</style>
 </head>
@@ -223,4 +227,13 @@ print('Content-Type: application/json; charset=utf-8')
 print('Cache-Control: no-store')
 print()
 print(json.dumps({{'ok': True}}, ensure_ascii=False))
+'''
+
+
+def _luci_redirect():
+    return '''#!/usr/bin/python3
+print('Status: 302 Found')
+print('Location: /')
+print('Cache-Control: no-store')
+print()
 '''
