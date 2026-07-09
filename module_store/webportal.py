@@ -28,6 +28,8 @@ def _out(cmd):
 
 
 def _get(cfg, key):
+    if key == 'home':
+        return DEFAULTS['home']
     return cfg.get(key) or DEFAULTS[key]
 
 
@@ -93,7 +95,7 @@ def enable(core, cfg):
     cfg['domain'] = domain or domain_default
     cfg['ip'] = _ipv4(ip)
     cfg['port'] = DEFAULTS['port']
-    cfg['home'] = cfg.get('home') or DEFAULTS['home']
+    cfg['home'] = DEFAULTS['home']
     cfg['users_dir'] = cfg.get('users_dir') or DEFAULTS['users_dir']
 
 
