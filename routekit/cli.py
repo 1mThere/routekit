@@ -148,13 +148,10 @@ def cmd_doctor(args):
 
 
 def _run(argv, label=None, check=True):
-    p = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if p.stdout:
-        print(p.stdout, end='')
+    p = subprocess.run(argv, text=True)
     if check and p.returncode != 0:
-        msg = (p.stderr or '').strip() or f'exit code {p.returncode}'
         name = label or argv[0]
-        raise SystemExit(f'{name} failed: {msg}')
+        raise SystemExit(f'{name} failed: exit code {p.returncode}')
     return p
 
 
@@ -196,7 +193,7 @@ def cmd_update(args):
     else:
         _install_from_archive()
     _run(['/usr/bin/rk', 'modules', 'update'], 'modules update')
-    if not args.no_apply:
+    if args.apply:
         _run(['/usr/bin/rk', 'apply'], 'apply')
     print('routekit updated')
 
@@ -264,6 +261,7 @@ def build_parser():
     s.set_defaults(func=cmd_doctor)
 
     s = sub.add_parser('update')
+    s.add_argument('--apply', action='store_true')
     s.add_argument('--no-apply', action='store_true')
     s.set_defaults(func=cmd_update)
 
