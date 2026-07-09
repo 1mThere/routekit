@@ -32,6 +32,37 @@ def _run(argv):
     return run(argv, text=True, stdout=PIPE, stderr=PIPE)
 
 
+def _exists(path):
+    return Path(path).exists()
+
+
+def _cmd(name):
+    return bool(shutil.which(name))
+
+
+def _install_deps():
+    if _exists('/etc/init.d/openvpn') and _cmd('openvpn'):
+        return
+    if _cmd('apk'):
+        _run(['apk', 'update'])
+        p = _run(['apk', 'add', 'openvpn-openssl', 'kmod-tun'])
+        if p.returncode != 0:
+            p = _run(['apk', 'add', 'openvpn-mbedtls', 'kmod-tun'])
+        if p.returncode != 0:
+            raise SystemExit('cannot install OpenVPN packages with apk')
+    elif _cmd('opkg'):
+        _run(['opkg', 'update'])
+        p = _run(['opkg', 'install', 'openvpn-openssl', 'kmod-tun'])
+        if p.returncode != 0:
+            p = _run(['opkg', 'install', 'openvpn-mbedtls', 'kmod-tun'])
+        if p.returncode != 0:
+            raise SystemExit('cannot install OpenVPN packages with opkg')
+    else:
+        raise SystemExit('cannot install OpenVPN packages: no apk or opkg')
+    if not _exists('/etc/init.d/openvpn'):
+        raise SystemExit('OpenVPN service is still missing after package install')
+
+
 def _ask(prompt, default=''):
     suffix = f' [{default}]' if default else ''
     return input(f'{prompt}{suffix}: ').strip().strip('"\'') or default
@@ -254,6 +285,7 @@ def render(core, cfg):
 
 
 def apply(core, cfg):
+    _install_deps()
     config_path = cfg.get('config_path')
     runtime_config_path = cfg.get('runtime_config_path') or '/etc/openvpn/routekit_openvpn.runtime.ovpn'
     iface = cfg.get('interface', 'vpnclient')
