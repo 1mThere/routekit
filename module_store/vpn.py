@@ -331,7 +331,7 @@ except Exception as e:
 
 
 def _web_home(core):
-    return Path(core.config.get('modules', {}).get('webportal', {}).get('home', '/www-routekit'))
+    return Path('/www-routekit')
 
 
 def enable(core, cfg):
