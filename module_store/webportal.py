@@ -32,16 +32,27 @@ def _get(cfg, key):
     return cfg.get(key) or DEFAULTS[key]
 
 
-def _ipv4(value, fallback=''):
+def _ipv4(value):
     m = re.search(r'(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)', str(value or ''))
-    return m.group(0) if m else fallback
+    return m.group(0) if m else ''
 
 
 def _lan_ip(cfg):
-    ip = _ipv4(cfg.get('lan_ip')) if cfg.get('lan_ip') != 'auto' else ''
-    ip = ip or _ipv4(_out(['uci', '-q', 'get', 'network.lan.ipaddr']))
-    ip = ip or _ipv4(_out(['ip', '-4', 'addr', 'show', 'dev', _get(cfg, 'lan_device')]))
-    return ip or DEFAULTS.get('fallback_lan_ip', '192.168.1.1')
+    if cfg.get('lan_ip') and cfg.get('lan_ip') != 'auto':
+        ip = _ipv4(cfg.get('lan_ip'))
+        if ip:
+            return ip
+        raise SystemExit('webportal.lan_ip is not a valid IPv4 address')
+
+    ip = _ipv4(_out(['uci', '-q', 'get', 'network.lan.ipaddr']))
+    if ip:
+        return ip
+
+    ip = _ipv4(_out(['ip', '-4', 'addr', 'show', 'dev', _get(cfg, 'lan_device')]))
+    if ip:
+        return ip
+
+    raise SystemExit('cannot detect LAN IPv4 address')
 
 
 def _write(path, data, mode=None):
@@ -78,10 +89,10 @@ def _backup(src, dst):
 
 def _restore(src, dst):
     src = Path(src)
-    if src.exists():
-        shutil.copy2(src, dst)
-        return True
-    return False
+    if not src.exists():
+        return False
+    shutil.copy2(src, dst)
+    return True
 
 
 def enable(core, cfg):
@@ -117,7 +128,6 @@ def apply(core, cfg):
     cfg['ip'] = 'auto'
     cfg['port'] = DEFAULTS['port']
     cfg['home'] = DEFAULTS['home']
-    _remove_legacy_ip(cfg)
     _remove('/etc/hotplug.d/iface/90-routekit-webportal-ip')
     _configure_uhttpd(cfg)
     _run(['/etc/init.d/uhttpd', 'enable'])
@@ -125,7 +135,6 @@ def apply(core, cfg):
 
 
 def cleanup(core, cfg):
-    _remove_legacy_ip(cfg)
     _remove('/www/cgi-bin/routekit-user')
     _remove(Path(core.config['dnsmasq_confdir']) / 'routekit-webportal.conf')
     _restore(_get(cfg, 'index_backup'), '/www/index.html')
@@ -174,17 +183,6 @@ def _configure_uhttpd(cfg):
         ['uci', 'commit', 'uhttpd'],
     ):
         _run(cmd)
-
-
-def _remove_legacy_ip(cfg):
-    ip = _ipv4(cfg.get('ip'))
-    dev = _get(cfg, 'lan_device')
-    if not ip or ip == _lan_ip(cfg):
-        return
-    for line in _out(['ip', '-o', '-4', 'addr', 'show', 'dev', dev]).splitlines():
-        addr = line.split()[3]
-        if addr.split('/', 1)[0] == ip:
-            _run(['ip', 'addr', 'del', addr, 'dev', dev])
 
 
 def _index_html(tiles):
