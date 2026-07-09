@@ -214,7 +214,6 @@ class Core:
         if name not in self.enabled_names():
             self.config['enabled_modules'].append(name)
         self.save()
-        self.apply()
 
     def _cleanup_loaded(self, mods):
         services = set()
