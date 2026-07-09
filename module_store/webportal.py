@@ -196,7 +196,7 @@ def _remove_ip(cfg):
 
 
 def _index_html(tiles):
-    body = '\n'.join(tiles) or '<section><h2>Модули не подключены</h2></section>'
+    body = '\n'.join(tiles) or '<section class="tile"><h2>Модули не подключены</h2></section>'
     return f'''<!doctype html>
 <html lang="ru">
 <head>
@@ -207,17 +207,17 @@ def _index_html(tiles):
 <meta http-equiv="Expires" content="0">
 <title>RouteKit</title>
 <style>
-:root{{color-scheme:dark;--bg:#070a0f;--panel:#111827;--text:#e7eaf0;--muted:#9fb0c3;--line:#263244;--button:#2563eb;--err:#ff9b9b;--ok:#86efac}}
+:root{{color-scheme:dark;--bg:#0b0d10;--panel:#11151b;--text:#e7eaf0;--muted:#a8b3c2;--line:#2a303a;--ok:#80e6a2;--err:#ff9b9b}}
 *{{box-sizing:border-box}}
-body{{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font-family:Arial,sans-serif}}
-main{{max-width:980px;margin:0 auto;padding:28px 18px}}
+body{{margin:0;background:var(--bg);color:var(--text);font-family:Arial,sans-serif}}
+main{{max-width:960px;margin:38px auto;padding:0 18px}}
 h1{{margin:0 0 22px;font-size:42px}}
-section{{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:18px 20px;margin:14px 0}}
-h2{{margin:0 0 14px;font-size:22px}}
-label{{display:block;margin:12px 0 8px;color:var(--muted)}}
-select,button{{width:100%;max-width:420px;border:1px solid var(--line);border-radius:12px;background:#0b1220;color:var(--text);padding:11px 12px;font-size:15px}}
-button{{margin-top:12px;background:var(--button);border:0;font-weight:700;cursor:pointer}}
-pre{{white-space:pre-wrap;background:#070a0f;border:1px solid var(--line);border-radius:12px;padding:12px;color:#cbd5e1}}
+.tile,section{{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:14px 0}}
+h2{{margin:0 0 14px;font-size:24px}}
+label{{display:block;margin:12px 0;color:var(--muted)}}
+select,button{{width:100%;max-width:420px;border:1px solid var(--line);border-radius:10px;background:#0b0f16;color:var(--text);padding:10px;font-size:15px}}
+button{{margin-top:12px;background:#1d4ed8;border-color:#1d4ed8;font-weight:700;cursor:pointer}}
+pre{{white-space:pre-wrap;background:#0b0f16;border:1px solid var(--line);border-radius:10px;padding:12px;color:var(--muted)}}
 .status{{color:var(--muted)}}
 .status.ok{{color:var(--ok)}}
 .status.err{{color:var(--err)}}
