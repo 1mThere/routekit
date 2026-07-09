@@ -160,8 +160,21 @@ def _tile_no_providers():
 </section>'''
 
 
-def _tile(providers, items, ready):
+def _provider_control(providers):
+    if len(providers) == 1:
+        provider = providers[0]
+        return f'''<input type="hidden" name="provider" value="{provider}">
+<p class="status">Протокол: {provider}</p>'''
     options = ''.join(f'<option value="{p}">{p}</option>' for p in providers)
+    return f'''<label>Протокол
+<select name="provider">
+{options}
+</select>
+</label>'''
+
+
+def _tile(providers, items, ready):
+    provider_control = _provider_control(providers)
     st_items = '\n'.join(items) if items else 'список пуст'
     vpn_status = '' if ready else '<p class="status err">VPN ещё не готов. Трафик может не пройти.</p>'
     return f'''<section class="tile" id="vpn-tile">
@@ -179,11 +192,7 @@ def _tile(providers, items, ready):
 <summary>Стандартный список</summary>
 <pre>{st_items}</pre>
 </details>
-<label>Протокол
-<select name="provider">
-{options}
-</select>
-</label>
+{provider_control}
 <button type="submit">Сохранить</button>
 <p class="status" id="vpn-status"></p>
 </form>
@@ -195,22 +204,25 @@ def _tile(providers, items, ready):
   const stlist = document.getElementById('vpn-stlist');
   function setStatus(text, cls) {{ status.textContent = text; status.className = 'status ' + (cls || ''); }}
   function syncList() {{ stlist.style.display = form.mode.value === 'standard' ? 'block' : 'none'; }}
+  function parseJson(r) {{ return r.text().then(t => {{ if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 160)); try {{ return JSON.parse(t); }} catch (e) {{ throw new Error(t.slice(0, 160) || String(e)); }} }}); }}
+  function providerField() {{ return form.elements.provider; }}
   function fill(data) {{
     if (!data.ok) {{ setStatus(data.error || 'Не удалось загрузить настройки', 'err'); return; }}
     if (form.mode.querySelector('option[value="' + data.mode + '"]')) form.mode.value = data.mode;
-    if (form.provider.querySelector('option[value="' + data.provider + '"]')) form.provider.value = data.provider;
+    const p = providerField();
+    if (p && p.tagName === 'SELECT' && p.querySelector('option[value="' + data.provider + '"]')) p.value = data.provider;
     syncList();
     setStatus(data.saved ? 'Сохранено' : '', data.saved ? 'ok' : '');
   }}
   function load() {{
-    fetch(url, {{cache:'no-store'}}).then(r => r.json()).then(fill).catch(() => setStatus('Не удалось загрузить настройки', 'err'));
+    fetch(url, {{cache:'no-store'}}).then(parseJson).then(fill).catch(e => setStatus(String(e.message || e), 'err'));
   }}
   form.mode.addEventListener('change', syncList);
   form.addEventListener('submit', e => {{
     e.preventDefault();
     setStatus('Сохранение...');
     fetch(url, {{method:'POST', body:new URLSearchParams(new FormData(form))}})
-      .then(r => r.json()).then(fill).catch(() => setStatus('Не сохранилось', 'err'));
+      .then(parseJson).then(fill).catch(e => setStatus(String(e.message || e), 'err'));
   }});
   load();
 }})();
