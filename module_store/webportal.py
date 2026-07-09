@@ -8,11 +8,14 @@ DEFAULTS = {
     'domain': 'v.be',
     'ip': '',
     'port': 80,
+    'https_port': 443,
     'home': '/www-routekit',
     'lan_device': 'br-lan',
     'users_dir': '/etc/routekit/users',
     'uhttpd_backup': '/etc/routekit/backups/uhttpd.before-webportal',
     'index_backup': '/etc/routekit/backups/www-index.before-webportal',
+    'cert': '/etc/uhttpd.crt',
+    'key': '/etc/uhttpd.key',
 }
 
 
@@ -95,8 +98,11 @@ def enable(core, cfg):
     cfg['domain'] = domain or domain_default
     cfg['ip'] = _ipv4(ip)
     cfg['port'] = DEFAULTS['port']
+    cfg['https_port'] = DEFAULTS['https_port']
     cfg['home'] = DEFAULTS['home']
     cfg['users_dir'] = cfg.get('users_dir') or DEFAULTS['users_dir']
+    cfg['cert'] = cfg.get('cert') or DEFAULTS['cert']
+    cfg['key'] = cfg.get('key') or DEFAULTS['key']
 
 
 def render(core, cfg):
@@ -144,9 +150,11 @@ def status(core, cfg):
         'domain': _get(cfg, 'domain'),
         'ip': cfg.get('ip') or '',
         'port': DEFAULTS['port'],
+        'https_port': DEFAULTS['https_port'],
         'home': _get(cfg, 'home'),
         'users': users,
         'url': f'http://{_get(cfg, "domain")}',
+        'https_url': f'https://{_get(cfg, "domain")}',
     }
 
 
@@ -159,12 +167,17 @@ def _ensure_dnsmasq_confdir(path):
 
 def _configure_uhttpd(cfg):
     _backup('/etc/config/uhttpd', _get(cfg, 'uhttpd_backup'))
+    ip = _portal_ip(cfg)
     for cmd in (
         ['uci', '-q', 'delete', 'uhttpd.routekit'],
         ['uci', 'set', 'uhttpd.routekit=uhttpd'],
         ['uci', 'set', f'uhttpd.routekit.home={_get(cfg, "home")}'],
         ['uci', 'set', 'uhttpd.routekit.cgi_prefix=/cgi-bin'],
-        ['uci', 'set', f'uhttpd.routekit.listen_http={_portal_ip(cfg)}:80'],
+        ['uci', 'set', f'uhttpd.routekit.listen_http={ip}:80'],
+        ['uci', 'set', f'uhttpd.routekit.listen_https={ip}:443'],
+        ['uci', 'set', f'uhttpd.routekit.cert={_get(cfg, "cert")}'],
+        ['uci', 'set', f'uhttpd.routekit.key={_get(cfg, "key")}'],
+        ['uci', 'set', 'uhttpd.routekit.redirect_https=0'],
         ['uci', 'commit', 'uhttpd'],
     ):
         _run(cmd)
