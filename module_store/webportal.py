@@ -6,11 +6,10 @@ from subprocess import PIPE, run
 PRIORITY = 1000
 DEFAULTS = {
     'domain': 'v.be',
-    'ip': 'auto',
+    'ip': '',
     'port': 80,
-    'home': '/www',
+    'home': '/www-routekit',
     'lan_device': 'br-lan',
-    'lan_ip': 'auto',
     'users_dir': '/etc/routekit/users',
     'uhttpd_backup': '/etc/routekit/backups/uhttpd.before-webportal',
     'index_backup': '/etc/routekit/backups/www-index.before-webportal',
@@ -33,26 +32,15 @@ def _get(cfg, key):
 
 
 def _ipv4(value):
-    m = re.search(r'(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)', str(value or ''))
-    return m.group(0) if m else ''
+    m = re.fullmatch(r'\s*((?:\d{1,3}\.){3}\d{1,3})(?:/\d{1,2})?\s*', str(value or ''))
+    return m.group(1) if m else ''
 
 
-def _lan_ip(cfg):
-    if cfg.get('lan_ip') and cfg.get('lan_ip') != 'auto':
-        ip = _ipv4(cfg.get('lan_ip'))
-        if ip:
-            return ip
-        raise SystemExit('webportal.lan_ip is not a valid IPv4 address')
-
-    ip = _ipv4(_out(['uci', '-q', 'get', 'network.lan.ipaddr']))
-    if ip:
-        return ip
-
-    ip = _ipv4(_out(['ip', '-4', 'addr', 'show', 'dev', _get(cfg, 'lan_device')]))
-    if ip:
-        return ip
-
-    raise SystemExit('cannot detect LAN IPv4 address')
+def _portal_ip(cfg):
+    ip = _ipv4(cfg.get('ip'))
+    if not ip:
+        raise SystemExit('webportal.ip is required')
+    return ip
 
 
 def _write(path, data, mode=None):
@@ -96,51 +84,53 @@ def _restore(src, dst):
 
 
 def enable(core, cfg):
-    domain = input(f'portal domain [{cfg.get("domain", DEFAULTS["domain"])}]: ').strip()
-    cfg['domain'] = domain or cfg.get('domain', DEFAULTS['domain'])
-    cfg['ip'] = 'auto'
+    domain_default = cfg.get('domain') or DEFAULTS['domain']
+    ip_default = cfg.get('ip') or ''
+    domain = input(f'portal domain [{domain_default}]: ').strip()
+    ip = input(f'portal ip [{ip_default}]: ').strip() or ip_default
+    if not _ipv4(ip):
+        raise SystemExit('webportal.ip is required')
+    cfg['domain'] = domain or domain_default
+    cfg['ip'] = _ipv4(ip)
     cfg['port'] = DEFAULTS['port']
-    cfg['home'] = DEFAULTS['home']
-    cfg['users_dir'] = cfg.get('users_dir', DEFAULTS['users_dir'])
+    cfg['home'] = cfg.get('home') or DEFAULTS['home']
+    cfg['users_dir'] = cfg.get('users_dir') or DEFAULTS['users_dir']
 
 
 def render(core, cfg):
-    cfg['ip'] = 'auto'
-    cfg['port'] = DEFAULTS['port']
-    cfg['home'] = DEFAULTS['home']
-
+    ip = _portal_ip(cfg)
+    home = Path(_get(cfg, 'home'))
     users_dir = Path(_get(cfg, 'users_dir'))
-    users_dir.mkdir(parents=True, exist_ok=True)
-
     dns_dir = Path(core.config['dnsmasq_confdir'])
-    dns_dir.mkdir(parents=True, exist_ok=True)
-    _ensure_dnsmasq_confdir(dns_dir)
-    dns_changed = _write(dns_dir / 'routekit-webportal.conf', f'address=/{_get(cfg, "domain")}/{_lan_ip(cfg)}\n')
 
-    _backup('/www/index.html', _get(cfg, 'index_backup'))
-    _write('/www/index.html', _index_html(list(getattr(core, 'portal_tiles', []))))
-    _write('/www/cgi-bin/routekit-user', _user_api(str(users_dir)), 0o755)
+    home.mkdir(parents=True, exist_ok=True)
+    users_dir.mkdir(parents=True, exist_ok=True)
+    dns_dir.mkdir(parents=True, exist_ok=True)
+
+    _ensure_dnsmasq_confdir(dns_dir)
+    dns_changed = _write(dns_dir / 'routekit-webportal.conf', f'address=/{_get(cfg, "domain")}/{ip}\n')
+    _write(home / 'index.html', _index_html(list(getattr(core, 'portal_tiles', []))))
+    _write(home / 'cgi-bin' / 'routekit-user', _user_api(str(users_dir)), 0o755)
 
     return ['dnsmasq', 'uhttpd'] if dns_changed else ['uhttpd']
 
 
 def apply(core, cfg):
-    cfg['ip'] = 'auto'
-    cfg['port'] = DEFAULTS['port']
-    cfg['home'] = DEFAULTS['home']
-    _remove('/etc/hotplug.d/iface/90-routekit-webportal-ip')
+    ip = _portal_ip(cfg)
+    _restore(_get(cfg, 'index_backup'), '/www/index.html')
+    _run(['ip', 'addr', 'replace', f'{ip}/32', 'dev', _get(cfg, 'lan_device')])
     _configure_uhttpd(cfg)
     _run(['/etc/init.d/uhttpd', 'enable'])
     _run(['/etc/init.d/uhttpd', 'restart'])
 
 
 def cleanup(core, cfg):
-    _remove('/www/cgi-bin/routekit-user')
+    _remove_ip(cfg)
+    _remove(_get(cfg, 'home'))
     _remove(Path(core.config['dnsmasq_confdir']) / 'routekit-webportal.conf')
     _restore(_get(cfg, 'index_backup'), '/www/index.html')
-    if not _restore(_get(cfg, 'uhttpd_backup'), '/etc/config/uhttpd'):
-        _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
-        _run(['uci', 'commit', 'uhttpd'])
+    _run(['uci', '-q', 'delete', 'uhttpd.routekit'])
+    _run(['uci', 'commit', 'uhttpd'])
     _run(['/etc/init.d/uhttpd', 'enable'])
     return ['dnsmasq', 'uhttpd']
 
@@ -148,15 +138,13 @@ def cleanup(core, cfg):
 def status(core, cfg):
     users_dir = Path(_get(cfg, 'users_dir'))
     users = len(list(users_dir.glob('*.json'))) if users_dir.exists() else 0
-    lan_ip = _lan_ip(cfg)
     return {
         'domain': _get(cfg, 'domain'),
-        'ip': lan_ip,
+        'ip': cfg.get('ip') or '',
         'port': DEFAULTS['port'],
-        'home': DEFAULTS['home'],
+        'home': _get(cfg, 'home'),
         'users': users,
         'url': f'http://{_get(cfg, "domain")}',
-        'luci': f'http://{lan_ip}/cgi-bin/luci',
     }
 
 
@@ -169,20 +157,26 @@ def _ensure_dnsmasq_confdir(path):
 
 def _configure_uhttpd(cfg):
     _backup('/etc/config/uhttpd', _get(cfg, 'uhttpd_backup'))
-    lan_ip = _lan_ip(cfg)
     for cmd in (
         ['uci', '-q', 'delete', 'uhttpd.routekit'],
-        ['uci', '-q', 'set', 'uhttpd.main=uhttpd'],
-        ['uci', '-q', 'delete', 'uhttpd.main.listen_http'],
-        ['uci', '-q', 'delete', 'uhttpd.main.listen_https'],
-        ['uci', 'add_list', f'uhttpd.main.listen_http={lan_ip}:80'],
-        ['uci', 'set', 'uhttpd.main.home=/www'],
-        ['uci', 'set', 'uhttpd.main.cgi_prefix=/cgi-bin'],
-        ['uci', 'set', 'uhttpd.main.redirect_https=0'],
-        ['uci', 'set', 'uhttpd.main.rfc1918_filter=0'],
+        ['uci', 'set', 'uhttpd.routekit=uhttpd'],
+        ['uci', 'set', f'uhttpd.routekit.home={_get(cfg, "home")}'],
+        ['uci', 'set', 'uhttpd.routekit.cgi_prefix=/cgi-bin'],
+        ['uci', 'set', f'uhttpd.routekit.listen_http={_portal_ip(cfg)}:80'],
         ['uci', 'commit', 'uhttpd'],
     ):
         _run(cmd)
+
+
+def _remove_ip(cfg):
+    ip = _ipv4(cfg.get('ip'))
+    if not ip:
+        return
+    dev = _get(cfg, 'lan_device')
+    for line in _out(['ip', '-o', '-4', 'addr', 'show', 'dev', dev]).splitlines():
+        parts = line.split()
+        if len(parts) > 3 and parts[3].split('/', 1)[0] == ip:
+            _run(['ip', 'addr', 'del', parts[3], 'dev', dev])
 
 
 def _index_html(tiles):
